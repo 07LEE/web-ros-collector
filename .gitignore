@@ -1,0 +1,14 @@
+# ROS2 Build artifacts
+build/
+install/
+log/
+
+# SSL certificates (local environment only)
+certs/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/

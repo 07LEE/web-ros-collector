@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WROS Camera Bridge</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #121212;
+            color: #ffffff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        #container {
+            width: 90%;
+            max-width: 640px;
+            text-align: center;
+        }
+        video {
+            width: 100%;
+            border-radius: 8px;
+            background-color: #000000;
+            transform: scaleX(1);
+        }
+        .btn {
+            background-color: #0066cc;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 15px;
+            transition: background-color 0.2s;
+        }
+        .btn:hover {
+            background-color: #0052a3;
+        }
+        #status {
+            margin-top: 15px;
+            font-size: 14px;
+            color: #aaaaaa;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>WROS Camera Stream</h1>
+        <video id="video" autoplay playsinline></video>
+        <button id="startBtn" class="btn">스트리밍 시작</button>
+        <div id="status">상태: 대기 중</div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const startBtn = document.getElementById('startBtn');
+        const statusDiv = document.getElementById('status');
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        let streaming = false;
+        let streamInterval = null;
+
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: 'environment',
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    },
+                    audio: false
+                });
+                video.srcObject = stream;
+                statusDiv.innerText = "상태: 카메라 연결 성공";
+            } catch (err) {
+                console.error("카메라 접근 오류: ", err);
+                statusDiv.innerText = "상태: 카메라 접근 실패 (" + err.message + ")";
+            }
+        }
+
+        async function sendFrame() {
+            if (!streaming) return;
+            if (video.videoWidth === 0 || video.videoHeight === 0) {
+                return;
+            }
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            canvas.toBlob(async (blob) => {
+                if (!blob) return;
+                try {
+                    const arrayBuffer = await blob.arrayBuffer();
+                    const response = await fetch('/upload', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'image/jpeg'
+                        },
+                        body: arrayBuffer
+                    });
+                    if (response.ok) {
+                        statusDiv.innerText = "상태: 스트리밍 중... (전송 성공)";
+                    } else {
+                        statusDiv.innerText = "상태: 전송 오류 (" + response.status + ")";
+                    }
+                } catch (err) {
+                    console.error("업로드 오류: ", err);
+                    statusDiv.innerText = "상태: 서버 연결 실패";
+                }
+            }, 'image/jpeg', 0.6);
+        }
+
+        startBtn.addEventListener('click', () => {
+            if (!streaming) {
+                streaming = true;
+                startBtn.innerText = "스트리밍 중지";
+                startBtn.style.backgroundColor = "#cc3300";
+                streamInterval = setInterval(sendFrame, 100);
+            } else {
+                streaming = false;
+                startBtn.innerText = "스트리밍 시작";
+                startBtn.style.backgroundColor = "#0066cc";
+                clearInterval(streamInterval);
+                statusDiv.innerText = "상태: 중지됨";
+            }
+        });
+
+        window.addEventListener('load', initCamera);
+    </script>
+</body>
+</html>
