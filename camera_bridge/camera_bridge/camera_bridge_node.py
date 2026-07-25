@@ -1,4 +1,4 @@
-"""ROS2 node for bridging smartphone web camera feed into ROS2 CompressedImage topics."""
+"""ROS2 node for bridging smartphone web camera feed into ROS2 Image and CompressedImage topics."""
 
 import http.server
 import os
@@ -8,16 +8,19 @@ import ssl
 import subprocess
 import threading
 
+import cv2
+import numpy as np
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import CompressedImage, Image
 
 
 class CameraHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     """HTTP request handler for receiving JPEG frames from smartphone browser."""
 
     node = None
-    publisher = None
+    compressed_publisher = None
+    raw_publisher = None
     html_filepath = ""
 
     def log_message(self, format, *args):
@@ -43,7 +46,7 @@ class CameraHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        """Handles HTTP POST requests to receive JPEG binary data and publish to ROS2 topic."""
+        """Handles HTTP POST requests to receive JPEG binary data and publish to ROS2 topics."""
         if self.path == '/upload':
             try:
                 content_length = int(self.headers['Content-Length'])
@@ -54,13 +57,35 @@ class CameraHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b"OK")
 
-                if self.publisher is not None and self.node is not None:
-                    msg = CompressedImage()
-                    msg.header.stamp = self.node.get_clock().now().to_msg()
-                    msg.header.frame_id = 'phone_camera'
-                    msg.format = 'jpeg'
-                    msg.data = post_data
-                    self.publisher.publish(msg)
+                if self.node is not None:
+                    now = self.node.get_clock().now().to_msg()
+
+                    # 1. Publish CompressedImage topic (/image_raw/compressed)
+                    if self.compressed_publisher is not None:
+                        comp_msg = CompressedImage()
+                        comp_msg.header.stamp = now
+                        comp_msg.header.frame_id = 'phone_camera'
+                        comp_msg.format = 'jpeg'
+                        comp_msg.data = post_data
+                        self.compressed_publisher.publish(comp_msg)
+
+                    # 2. Publish raw Image topic (/image_raw) for standard ROS2 viewers (rqt_image_view)
+                    if self.raw_publisher is not None:
+                        np_arr = np.frombuffer(post_data, np.uint8)
+                        cv_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                        if cv_img is not None:
+                            height, width, channels = cv_img.shape
+                            raw_msg = Image()
+                            raw_msg.header.stamp = now
+                            raw_msg.header.frame_id = 'phone_camera'
+                            raw_msg.height = height
+                            raw_msg.width = width
+                            raw_msg.encoding = 'bgr8'
+                            raw_msg.is_bigendian = 0
+                            raw_msg.step = width * channels
+                            raw_msg.data = cv_img.tobytes()
+                            self.raw_publisher.publish(raw_msg)
+
             except Exception as e:
                 self.send_response(500)
                 self.end_headers()
@@ -92,14 +117,20 @@ class SecureHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 class CameraBridgeNode(Node):
-    """ROS2 Node managing the HTTPS server and publishing CompressedImage messages."""
+    """ROS2 Node managing the HTTPS server and publishing Image & CompressedImage messages."""
 
     def __init__(self):
         """Initializes the CameraBridgeNode, generates SSL certificates, and starts HTTPS server."""
         super().__init__('camera_bridge_node')
-        self.publisher = self.create_publisher(
+
+        self.compressed_publisher = self.create_publisher(
             CompressedImage,
             '/image_raw/compressed',
+            10
+        )
+        self.raw_publisher = self.create_publisher(
+            Image,
+            '/image_raw',
             10
         )
 
@@ -130,7 +161,8 @@ class CameraBridgeNode(Node):
         self.server_port = 8443
 
         CameraHTTPRequestHandler.node = self
-        CameraHTTPRequestHandler.publisher = self.publisher
+        CameraHTTPRequestHandler.compressed_publisher = self.compressed_publisher
+        CameraHTTPRequestHandler.raw_publisher = self.raw_publisher
         CameraHTTPRequestHandler.html_filepath = self.html_filepath
 
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
