@@ -107,6 +107,7 @@ class CameraHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
                 self.send_response(200)
                 self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Connection', 'keep-alive')
                 self.end_headers()
                 self.wfile.write(b"OK")
 
@@ -115,10 +116,11 @@ class CameraHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
                     # 1. Publish CompressedImage topic (/image_raw/compressed)
                     if self.compressed_publisher is not None:
+                        img_format = 'png' if 'png' in self.headers.get('Content-Type', '') else 'jpeg'
                         comp_msg = CompressedImage()
                         comp_msg.header.stamp = now
                         comp_msg.header.frame_id = 'phone_camera'
-                        comp_msg.format = 'jpeg'
+                        comp_msg.format = img_format
                         comp_msg.data = post_data
                         self.compressed_publisher.publish(comp_msg)
 
