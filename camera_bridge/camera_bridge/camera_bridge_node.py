@@ -1,6 +1,7 @@
 """ROS2 node for bridging smartphone web camera feed into ROS2 Image and CompressedImage topics."""
 
 import http.server
+import json
 import os
 import socket
 import socketserver
@@ -13,14 +14,16 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage, Image
+from std_msgs.msg import String
 
 
 class CameraHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
-    """HTTP request handler for receiving JPEG frames from smartphone browser."""
+    """HTTP request handler for receiving JPEG frames and device info from smartphone browser."""
 
     node = None
     compressed_publisher = None
     raw_publisher = None
+    device_info_publisher = None
     html_filepath = ""
 
     def log_message(self, format, *args):
@@ -28,13 +31,29 @@ class CameraHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        """Handles HTTP GET requests to serve the web interface page."""
-        if self.path in ('/', '/index.html'):
+        """Handles HTTP GET requests to serve static files from the web directory."""
+        filename = 'index.html' if self.path in ('/', '/index.html') else self.path.lstrip('/')
+        web_dir = os.path.dirname(self.html_filepath)
+        target_path = os.path.abspath(os.path.join(web_dir, filename))
+
+        if not target_path.startswith(web_dir):
+            self.send_response(403)
+            self.end_headers()
+            return
+
+        if os.path.exists(target_path) and os.path.isfile(target_path):
             try:
-                with open(self.html_filepath, 'rb') as f:
+                with open(target_path, 'rb') as f:
                     content = f.read()
+
+                content_type = 'text/html; charset=utf-8'
+                if filename.endswith('.css'):
+                    content_type = 'text/css; charset=utf-8'
+                elif filename.endswith('.js'):
+                    content_type = 'application/javascript; charset=utf-8'
+
                 self.send_response(200)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Type', content_type)
                 self.end_headers()
                 self.wfile.write(content)
             except Exception as e:
@@ -46,8 +65,42 @@ class CameraHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        """Handles HTTP POST requests to receive JPEG binary data and publish to ROS2 topics."""
-        if self.path == '/upload':
+        """Handles HTTP POST requests to receive JPEG binary data or device information."""
+        if self.path == '/device_info':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data.decode('utf-8'))
+
+                model = data.get('model', 'Unknown Device')
+                os_info = data.get('os', 'Unknown OS')
+                browser = data.get('browser', 'Unknown Browser')
+                camera_label = data.get('cameraLabel', 'Unknown Camera')
+                width = data.get('width', 0)
+                height = data.get('height', 0)
+                fps = data.get('frameRate', 0)
+
+                log_msg = (
+                    f"Connected Device -> Model: {model} | OS: {os_info} | Browser: {browser} | "
+                    f"Camera: {camera_label} ({width}x{height} @ {fps}fps)"
+                )
+
+                if self.node is not None:
+                    self.node.get_logger().info(log_msg)
+                    if self.device_info_publisher is not None:
+                        info_msg = String()
+                        info_msg.data = json.dumps(data)
+                        self.device_info_publisher.publish(info_msg)
+
+                self.send_response(200)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(b"OK")
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+
+        elif self.path == '/upload':
             try:
                 content_length = int(self.headers['Content-Length'])
                 post_data = self.rfile.read(content_length)
@@ -69,8 +122,8 @@ class CameraHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                         comp_msg.data = post_data
                         self.compressed_publisher.publish(comp_msg)
 
-                    # 2. Publish raw Image topic (/image_raw) for standard ROS2 viewers (rqt_image_view)
-                    if self.raw_publisher is not None:
+                    # 2. Lazy decoding: publish raw Image topic (/image_raw) ONLY if there are active subscribers
+                    if self.raw_publisher is not None and self.raw_publisher.get_subscription_count() > 0:
                         np_arr = np.frombuffer(post_data, np.uint8)
                         cv_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
                         if cv_img is not None:
@@ -133,6 +186,11 @@ class CameraBridgeNode(Node):
             '/image_raw',
             10
         )
+        self.device_info_publisher = self.create_publisher(
+            String,
+            '/camera_bridge/device_info',
+            10
+        )
 
         self.ip_address = self.get_local_ip()
 
@@ -163,6 +221,7 @@ class CameraBridgeNode(Node):
         CameraHTTPRequestHandler.node = self
         CameraHTTPRequestHandler.compressed_publisher = self.compressed_publisher
         CameraHTTPRequestHandler.raw_publisher = self.raw_publisher
+        CameraHTTPRequestHandler.device_info_publisher = self.device_info_publisher
         CameraHTTPRequestHandler.html_filepath = self.html_filepath
 
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -247,7 +306,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

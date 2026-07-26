@@ -4,55 +4,56 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WROS Camera Bridge</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background-color: #121212;
-            color: #ffffff;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            min-height: 100vh;
-        }
-        #container {
-            width: 90%;
-            max-width: 640px;
-            text-align: center;
-        }
-        video {
-            width: 100%;
-            border-radius: 8px;
-            background-color: #000000;
-            transform: scaleX(1);
-        }
-        .btn {
-            background-color: #0066cc;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            font-size: 16px;
-            border-radius: 4px;
-            cursor: pointer;
-            margin-top: 15px;
-            transition: background-color 0.2s;
-        }
-        .btn:hover {
-            background-color: #0052a3;
-        }
-        #status {
-            margin-top: 15px;
-            font-size: 14px;
-            color: #aaaaaa;
-        }
-    </style>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div id="container">
         <h1>WROS Camera Stream</h1>
+        
+        <div class="card">
+            <div class="info-row">
+                <span class="info-label">실시간 전송 성능:</span>
+                <span class="info-val" id="streamStats">0 FPS | 0 KB/s</span>
+            </div>
+        </div>
+
         <video id="video" autoplay playsinline></video>
+
+        <div class="controls">
+            <div class="control-group control-group-full">
+                <label for="cameraSelect">카메라 렌즈 선택</label>
+                <select id="cameraSelect">
+                    <option value="">카메라 검색 중...</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label for="resSelect">목표 해상도</label>
+                <select id="resSelect">
+                    <option value="3840x2160">4K Ultra HD (3840x2160)</option>
+                    <option value="1920x1080" selected>Full HD (1920x1080)</option>
+                    <option value="1280x720">HD (1280x720)</option>
+                    <option value="640x480">SD (640x480)</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label for="maxFpsSelect">목표 FPS</label>
+                <select id="maxFpsSelect">
+                    <option value="0" selected>최대 (Max 60fps)</option>
+                    <option value="60">60 FPS</option>
+                    <option value="30">30 FPS</option>
+                    <option value="15">15 FPS</option>
+                </select>
+            </div>
+            <div class="control-group control-group-full" id="zoomGroup" style="display:none;">
+                <label for="zoomRange">카메라 배율 (Zoom): <span id="zoomVal">1.0x</span></label>
+                <input type="range" id="zoomRange" min="1" max="10" step="0.1" value="1">
+            </div>
+            <div class="control-group control-group-full">
+                <label for="qualityRange">JPEG 화질: <span id="qualityVal">85%</span></label>
+                <input type="range" id="qualityRange" min="10" max="100" value="85">
+            </div>
+        </div>
+
         <button id="startBtn" class="btn">스트리밍 시작</button>
         <div id="status">상태: 대기 중</div>
     </div>
@@ -61,22 +62,209 @@
         const video = document.getElementById('video');
         const startBtn = document.getElementById('startBtn');
         const statusDiv = document.getElementById('status');
+        const deviceModelSpan = document.getElementById('deviceModel');
+        const cameraLabelSpan = document.getElementById('cameraLabel');
+        const currentResFpsSpan = document.getElementById('currentResFps');
+        const streamStatsSpan = document.getElementById('streamStats');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const resSelect = document.getElementById('resSelect');
+        const qualityRange = document.getElementById('qualityRange');
+        const qualityVal = document.getElementById('qualityVal');
+        const maxFpsSelect = document.getElementById('maxFpsSelect');
+
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
+
+        let mediaStream = null;
+        let videoTrack = null;
         let streaming = false;
-        let streamInterval = null;
+        let isUploading = false;
+        let lastFrameTime = 0;
+        let frameCount = 0;
+        let totalBytes = 0;
+        let statsInterval = null;
+        let animationFrameId = null;
+        let deviceInfoObj = {};
+
+        const zoomGroup = document.getElementById('zoomGroup');
+        const zoomRange = document.getElementById('zoomRange');
+        const zoomVal = document.getElementById('zoomVal');
+
+        qualityRange.addEventListener('input', () => {
+            qualityVal.innerText = qualityRange.value + '%';
+        });
+
+        zoomRange.addEventListener('input', () => {
+            const val = parseFloat(zoomRange.value);
+            zoomVal.innerText = val.toFixed(1) + 'x';
+            if (videoTrack && videoTrack.applyConstraints) {
+                videoTrack.applyConstraints({
+                    advanced: [{ zoom: val }]
+                }).catch(err => console.warn("Zoom constraint failed:", err));
+            }
+        });
+
+        function parseFastDeviceInfo() {
+            let model = "Unknown Device";
+            let os = "Unknown OS";
+            let browser = "Unknown Browser";
+
+            const ua = navigator.userAgent;
+
+            if (/iPhone/i.test(ua)) {
+                model = "Apple iPhone";
+                os = "iOS";
+            } else if (/iPad/i.test(ua)) {
+                model = "Apple iPad";
+                os = "iOS";
+            } else if (/Android/i.test(ua)) {
+                const match = ua.match(/Android\s+[\d\.]+;\s*([^;\)]+)/i);
+                if (match && match[1]) {
+                    model = match[1].trim();
+                } else {
+                    model = "Android Device";
+                }
+                os = "Android";
+            } else if (/Macintosh/i.test(ua)) {
+                model = "Mac Device";
+                os = "macOS";
+            } else if (/Windows/i.test(ua)) {
+                model = "Windows PC";
+                os = "Windows";
+            } else if (/Linux/i.test(ua)) {
+                model = "Linux PC";
+                os = "Linux";
+            }
+
+            if (/Chrome/i.test(ua) && !/Edg/i.test(ua)) browser = "Chrome";
+            else if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) browser = "Safari";
+            else if (/Firefox/i.test(ua)) browser = "Firefox";
+            else if (/Edg/i.test(ua)) browser = "Edge";
+
+            return { model, os, browser, rawUserAgent: ua };
+        }
+
+        function formatCameraDeviceLabel(device, idx) {
+            const rawLabel = device.label || '';
+            
+            // Check for explicit facing mode keywords
+            const isBack = /back|environment|rear|facing\s*back/i.test(rawLabel);
+            const isFront = /front|user|selfie/i.test(rawLabel);
+
+            if (isBack) {
+                return `[후면] ${rawLabel || ('카메라 ' + (idx + 1))}`;
+            } else if (isFront) {
+                return `[전면] ${rawLabel || ('카메라 ' + (idx + 1))}`;
+            } else {
+                // If label doesn't specify, categorize by Android camera index conventions
+                if (idx === 0) {
+                    return `[전면 셀카] ${rawLabel || '카메라 1'}`;
+                } else {
+                    return `[후면 렌즈 ${idx}] ${rawLabel || ('카메라 ' + (idx + 1))}`;
+                }
+            }
+        }
+
+        async function loadCameraDevices() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(d => d.kind === 'videoinput');
+
+                const currentVal = cameraSelect.value;
+                cameraSelect.innerHTML = '';
+
+                if (videoDevices.length === 0) {
+                    cameraSelect.innerHTML = '<option value="">카메라를 찾을 수 없음</option>';
+                    return;
+                }
+
+                let defaultBackId = null;
+
+                videoDevices.forEach((device, idx) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = formatCameraDeviceLabel(device, idx);
+                    cameraSelect.appendChild(option);
+
+                    if (!defaultBackId && /back|environment|rear|facing\s*back/i.test(device.label)) {
+                        defaultBackId = device.deviceId;
+                    }
+                });
+
+                if (currentVal) {
+                    cameraSelect.value = currentVal;
+                } else if (defaultBackId) {
+                    cameraSelect.value = defaultBackId;
+                }
+            } catch (err) {
+                console.warn("카메라 장치 목록 로드 실패:", err);
+            }
+        }
 
         async function initCamera() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: {
-                        facingMode: 'environment',
-                        width: { ideal: 640 },
-                        height: { ideal: 480 }
-                    },
+                deviceInfoObj = parseFastDeviceInfo();
+                if (deviceModelSpan) deviceModelSpan.innerText = `${deviceInfoObj.model} (${deviceInfoObj.os})`;
+
+                if (mediaStream) {
+                    mediaStream.getTracks().forEach(track => track.stop());
+                }
+
+                await loadCameraDevices();
+
+                const selectedDeviceId = cameraSelect.value;
+                const [targetWidth, targetHeight] = resSelect.value.split('x').map(Number);
+
+                const videoConstraint = {
+                    width: { ideal: targetWidth },
+                    height: { ideal: targetHeight },
+                    frameRate: { ideal: 60 }
+                };
+
+                if (selectedDeviceId) {
+                    videoConstraint.deviceId = { exact: selectedDeviceId };
+                } else {
+                    videoConstraint.facingMode = { ideal: 'environment' };
+                }
+
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    video: videoConstraint,
                     audio: false
                 });
-                video.srcObject = stream;
+
+                video.srcObject = mediaStream;
+                videoTrack = mediaStream.getVideoTracks()[0];
+
+                if (videoTrack) {
+                    const settings = videoTrack.getSettings();
+                    const label = videoTrack.label || "Default Camera";
+                    if (cameraLabelSpan) cameraLabelSpan.innerText = label;
+                    if (currentResFpsSpan) currentResFpsSpan.innerText = `${settings.width || '-'}x${settings.height || '-'} @ ${Math.round(settings.frameRate || 0)}fps`;
+
+                    if (videoTrack.getCapabilities) {
+                        const capabilities = videoTrack.getCapabilities();
+                        if (capabilities.zoom) {
+                            zoomGroup.style.display = 'flex';
+                            zoomRange.min = capabilities.zoom.min || 1;
+                            zoomRange.max = capabilities.zoom.max || 10;
+                            zoomRange.step = capabilities.zoom.step || 0.1;
+                            zoomRange.value = settings.zoom || capabilities.zoom.min || 1;
+                            zoomVal.innerText = parseFloat(zoomRange.value).toFixed(1) + 'x';
+                        } else {
+                            zoomGroup.style.display = 'none';
+                        }
+                    } else {
+                        zoomGroup.style.display = 'none';
+                    }
+
+                    deviceInfoObj.cameraLabel = label;
+                    deviceInfoObj.width = settings.width;
+                    deviceInfoObj.height = settings.height;
+                    deviceInfoObj.frameRate = settings.frameRate;
+
+                    sendDeviceInfoAsync(deviceInfoObj);
+                }
+
                 statusDiv.innerText = "상태: 카메라 연결 성공";
             } catch (err) {
                 console.error("카메라 접근 오류: ", err);
@@ -84,50 +272,106 @@
             }
         }
 
-        async function sendFrame() {
+        function sendDeviceInfoAsync(info) {
+            fetch('/device_info', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(info)
+            }).catch(err => console.warn("디바이스 정보 전송 실패:", err));
+        }
+
+        cameraSelect.addEventListener('change', initCamera);
+        resSelect.addEventListener('change', initCamera);
+
+        async function sendFrameLoop(timestamp) {
             if (!streaming) return;
-            if (video.videoWidth === 0 || video.videoHeight === 0) {
-                return;
+
+            const targetFps = parseInt(maxFpsSelect.value);
+            const interval = targetFps > 0 ? (1000 / targetFps) : 0;
+
+            if (timestamp - lastFrameTime >= interval) {
+                if (!isUploading && video.videoWidth > 0 && video.videoHeight > 0) {
+                    isUploading = true;
+                    lastFrameTime = timestamp;
+
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                    const quality = parseFloat(qualityRange.value) / 100.0;
+
+                    canvas.toBlob(async (blob) => {
+                        if (!blob) {
+                            isUploading = false;
+                            return;
+                        }
+                        try {
+                            const arrayBuffer = await blob.arrayBuffer();
+                            totalBytes += arrayBuffer.byteLength;
+
+                            const response = await fetch('/upload', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'image/jpeg' },
+                                body: arrayBuffer
+                            });
+
+                            if (response.ok) {
+                                frameCount++;
+                                statusDiv.innerText = "상태: 실시간 스트리밍 중";
+                            } else {
+                                statusDiv.innerText = "상태: 전송 오류 (" + response.status + ")";
+                            }
+                        } catch (err) {
+                            console.error("업로드 오류: ", err);
+                            statusDiv.innerText = "상태: 서버 연결 끊김";
+                        } finally {
+                            isUploading = false;
+                        }
+                    }, 'image/jpeg', quality);
+                }
             }
 
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            animationFrameId = requestAnimationFrame(sendFrameLoop);
+        }
 
-            canvas.toBlob(async (blob) => {
-                if (!blob) return;
-                try {
-                    const arrayBuffer = await blob.arrayBuffer();
-                    const response = await fetch('/upload', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'image/jpeg'
-                        },
-                        body: arrayBuffer
-                    });
-                    if (response.ok) {
-                        statusDiv.innerText = "상태: 스트리밍 중... (전송 성공)";
-                    } else {
-                        statusDiv.innerText = "상태: 전송 오류 (" + response.status + ")";
-                    }
-                } catch (err) {
-                    console.error("업로드 오류: ", err);
-                    statusDiv.innerText = "상태: 서버 연결 실패";
-                }
-            }, 'image/jpeg', 0.6);
+        function startStatsInterval() {
+            statsInterval = setInterval(() => {
+                const fps = frameCount;
+                const kbps = (totalBytes / 1024).toFixed(1);
+                streamStatsSpan.innerText = `${fps} FPS | ${kbps} KB/s`;
+                frameCount = 0;
+                totalBytes = 0;
+            }, 1000);
+        }
+
+        function stopStatsInterval() {
+            if (statsInterval) {
+                clearInterval(statsInterval);
+                statsInterval = null;
+            }
+            streamStatsSpan.innerText = "0 FPS | 0 KB/s";
         }
 
         startBtn.addEventListener('click', () => {
             if (!streaming) {
                 streaming = true;
                 startBtn.innerText = "스트리밍 중지";
-                startBtn.style.backgroundColor = "#cc3300";
-                streamInterval = setInterval(sendFrame, 100);
+                startBtn.classList.add('btn-stop');
+                frameCount = 0;
+                totalBytes = 0;
+                lastFrameTime = performance.now();
+
+                startStatsInterval();
+                animationFrameId = requestAnimationFrame(sendFrameLoop);
             } else {
                 streaming = false;
                 startBtn.innerText = "스트리밍 시작";
-                startBtn.style.backgroundColor = "#0066cc";
-                clearInterval(streamInterval);
+                startBtn.classList.remove('btn-stop');
+                if (animationFrameId) {
+                    cancelAnimationFrame(animationFrameId);
+                    animationFrameId = null;
+                }
+                stopStatsInterval();
                 statusDiv.innerText = "상태: 중지됨";
             }
         });
