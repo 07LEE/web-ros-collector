@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WROS Mobile Sensor Bridge</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="container">
+        <h1>WROS Mobile Sensor Bridge</h1>
+        
+        <div class="video-wrapper">
+            <video id="video" autoplay playsinline></video>
+        </div>
+
+        <div class="controls">
+            <button id="startBtn" class="btn">스트리밍 시작</button>
+            <button id="imuPermissionBtn" class="btn btn-secondary">IMU 센서 권한 요청</button>
+        </div>
+
+        <div id="status">대기 중</div>
+
+        <!-- IMU 센서 실시간 수치 대시보드 -->
+        <div class="sensor-dashboard">
+            <h3>IMU Sensor Status</h3>
+            <div class="sensor-grid">
+                <div class="sensor-card">
+                    <h4>가속도 (m/s²)</h4>
+                    <div>X: <span id="accelX">0.00</span></div>
+                    <div>Y: <span id="accelY">0.00</span></div>
+                    <div>Z: <span id="accelZ">0.00</span></div>
+                </div>
+                <div class="sensor-card">
+                    <h4>각속도 (deg/s)</h4>
+                    <div>Yaw(α): <span id="gyroA">0.00</span></div>
+                    <div>Pitch(β): <span id="gyroB">0.00</span></div>
+                    <div>Roll(γ): <span id="gyroG">0.00</span></div>
+                </div>
+                <div class="sensor-card">
+                    <h4>방향 (deg)</h4>
+                    <div>Yaw(α): <span id="oriA">0.00</span></div>
+                    <div>Pitch(β): <span id="oriB">0.00</span></div>
+                    <div>Roll(γ): <span id="oriG">0.00</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const startBtn = document.getElementById('startBtn');
+        const imuPermissionBtn = document.getElementById('imuPermissionBtn');
+        const statusDiv = document.getElementById('status');
+
+        // Sensor UI Elements
+        const accelXEl = document.getElementById('accelX');
+        const accelYEl = document.getElementById('accelY');
+        const accelZEl = document.getElementById('accelZ');
+        const gyroAEl = document.getElementById('gyroA');
+        const gyroBEl = document.getElementById('gyroB');
+        const gyroGEl = document.getElementById('gyroG');
+        const oriAEl = document.getElementById('oriA');
+        const oriBEl = document.getElementById('oriB');
+        const oriGEl = document.getElementById('oriG');
+
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+
+        let mediaStream = null;
+        let streaming = false;
+        let isUploading = false;
+        let isImuUploading = false;
+        let animationFrameId = null;
+        let imuIntervalId = null;
+
+        const imuData = {
+            accel: { x: 0, y: 0, z: 0 },
+            gyro: { alpha: 0, beta: 0, gamma: 0 },
+            orientation: { alpha: 0, beta: 0, gamma: 0 }
+        };
+
+        function parseFastDeviceInfo() {
+            let model = "Unknown Device";
+            let os = "Unknown OS";
+            let browser = "Unknown Browser";
+
+            const ua = navigator.userAgent;
+
+            if (/iPhone/i.test(ua)) {
+                model = "Apple iPhone";
+                os = "iOS";
+            } else if (/iPad/i.test(ua)) {
+                model = "Apple iPad";
+                os = "iOS";
+            } else if (/Android/i.test(ua)) {
+                const match = ua.match(/Android\s+[\d\.]+;\s*([^;\)]+)/i);
+                model = (match && match[1]) ? match[1].trim() : "Android Device";
+                os = "Android";
+            } else if (/Macintosh/i.test(ua)) {
+                model = "Mac Device";
+                os = "macOS";
+            } else if (/Windows/i.test(ua)) {
+                model = "Windows PC";
+                os = "Windows";
+            } else if (/Linux/i.test(ua)) {
+                model = "Linux PC";
+                os = "Linux";
+            }
+
+            if (/Chrome/i.test(ua) && !/Edg/i.test(ua)) browser = "Chrome";
+            else if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) browser = "Safari";
+            else if (/Firefox/i.test(ua)) browser = "Firefox";
+            else if (/Edg/i.test(ua)) browser = "Edge";
+
+            return { model, os, browser, rawUserAgent: ua };
+        }
+
+        async function initCamera() {
+            try {
+                const deviceInfo = parseFastDeviceInfo();
+
+                const constraints = {
+                    video: {
+                        facingMode: { ideal: 'environment' },
+                        width: { ideal: 3840, max: 4096 },
+                        height: { ideal: 2160, max: 2160 },
+                        frameRate: { ideal: 60 }
+                    },
+                    audio: false
+                };
+
+                mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = mediaStream;
+
+                const videoTrack = mediaStream.getVideoTracks()[0];
+                if (videoTrack) {
+                    const settings = videoTrack.getSettings();
+                    deviceInfo.cameraLabel = videoTrack.label || "Default Camera";
+                    deviceInfo.width = settings.width;
+                    deviceInfo.height = settings.height;
+                    deviceInfo.frameRate = settings.frameRate;
+
+                    sendDeviceInfoAsync(deviceInfo);
+                }
+
+                statusDiv.innerText = "준비 완료";
+            } catch (err) {
+                console.error("카메라 접근 오류: ", err);
+                statusDiv.innerText = "카메라 접근 실패";
+            }
+        }
+
+        function setupIMUSensors() {
+            if (window.DeviceMotionEvent) {
+                window.addEventListener('devicemotion', (event) => {
+                    const acc = event.accelerationIncludingGravity || event.acceleration;
+                    if (acc) {
+                        imuData.accel.x = acc.x || 0;
+                        imuData.accel.y = acc.y || 0;
+                        imuData.accel.z = acc.z || 0;
+                    }
+                    if (event.rotationRate) {
+                        imuData.gyro.alpha = event.rotationRate.alpha || 0;
+                        imuData.gyro.beta = event.rotationRate.beta || 0;
+                        imuData.gyro.gamma = event.rotationRate.gamma || 0;
+                    }
+                    updateIMUDashboardUI();
+                });
+            }
+
+            if (window.DeviceOrientationEvent) {
+                window.addEventListener('deviceorientation', (event) => {
+                    imuData.orientation.alpha = event.alpha || 0;
+                    imuData.orientation.beta = event.beta || 0;
+                    imuData.orientation.gamma = event.gamma || 0;
+                    updateIMUDashboardUI();
+                });
+            }
+        }
+
+        function updateIMUDashboardUI() {
+            accelXEl.innerText = imuData.accel.x.toFixed(2);
+            accelYEl.innerText = imuData.accel.y.toFixed(2);
+            accelZEl.innerText = imuData.accel.z.toFixed(2);
+
+            gyroAEl.innerText = imuData.gyro.alpha.toFixed(2);
+            gyroBEl.innerText = imuData.gyro.beta.toFixed(2);
+            gyroGEl.innerText = imuData.gyro.gamma.toFixed(2);
+
+            oriAEl.innerText = imuData.orientation.alpha.toFixed(2);
+            oriBEl.innerText = imuData.orientation.beta.toFixed(2);
+            oriGEl.innerText = imuData.orientation.gamma.toFixed(2);
+        }
+
+        async function requestIMUPermission() {
+            if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                try {
+                    const permissionState = await DeviceMotionEvent.requestPermission();
+                    if (permissionState === 'granted') {
+                        setupIMUSensors();
+                        imuPermissionBtn.style.display = 'none';
+                        statusDiv.innerText = "IMU 센서 권한 승인됨";
+                    } else {
+                        statusDiv.innerText = "IMU 권한 거부됨";
+                    }
+                } catch (e) {
+                    console.error("IMU 권한 요청 실패:", e);
+                }
+            } else {
+                setupIMUSensors();
+                imuPermissionBtn.style.display = 'none';
+            }
+        }
+
+        function sendDeviceInfoAsync(info) {
+            fetch('/device_info', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(info)
+            }).catch(err => console.warn("디바이스 정보 전송 실패:", err));
+        }
+
+        function sendIMUData() {
+            if (!streaming || isImuUploading) return;
+            isImuUploading = true;
+
+            fetch('/imu', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(imuData)
+            }).catch(err => console.warn("IMU 데이터 전송 실패:", err))
+            .finally(() => {
+                isImuUploading = false;
+            });
+        }
+
+        function sendFrameLoop() {
+            if (!streaming) return;
+
+            if (!isUploading && video.videoWidth > 0 && video.videoHeight > 0) {
+                isUploading = true;
+
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                canvas.toBlob(async (blob) => {
+                    if (!blob) {
+                        isUploading = false;
+                        return;
+                    }
+                    try {
+                        const arrayBuffer = await blob.arrayBuffer();
+                        const response = await fetch('/upload', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'image/png' },
+                            body: arrayBuffer
+                        });
+
+                        if (response.ok) {
+                            statusDiv.innerText = "센서 스트리밍 중";
+                        } else {
+                            statusDiv.innerText = "전송 오류";
+                        }
+                    } catch (err) {
+                        console.error("업로드 오류: ", err);
+                        statusDiv.innerText = "서버 연결 끊김";
+                    } finally {
+                        isUploading = false;
+                    }
+                }, 'image/png');
+            }
+
+            animationFrameId = requestAnimationFrame(sendFrameLoop);
+        }
+
+        startBtn.addEventListener('click', () => {
+            if (!streaming) {
+                streaming = true;
+                startBtn.innerText = "스트리밍 중지";
+                startBtn.classList.add('btn-stop');
+                animationFrameId = requestAnimationFrame(sendFrameLoop);
+                imuIntervalId = setInterval(sendIMUData, 30); // ~33Hz IMU 전송
+            } else {
+                streaming = false;
+                startBtn.innerText = "스트리밍 시작";
+                startBtn.classList.remove('btn-stop');
+                if (animationFrameId) {
+                    cancelAnimationFrame(animationFrameId);
+                    animationFrameId = null;
+                }
+                if (imuIntervalId) {
+                    clearInterval(imuIntervalId);
+                    imuIntervalId = null;
+                }
+                statusDiv.innerText = "중지됨";
+            }
+        });
+
+        imuPermissionBtn.addEventListener('click', requestIMUPermission);
+
+        window.addEventListener('load', () => {
+            initCamera();
+            if (typeof DeviceMotionEvent === 'undefined' || typeof DeviceMotionEvent.requestPermission !== 'function') {
+                imuPermissionBtn.style.display = 'none';
+                setupIMUSensors();
+            }
+        });
+    </script>
+</body>
+</html>
