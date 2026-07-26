@@ -8,6 +8,7 @@ import socketserver
 import ssl
 import subprocess
 import threading
+from typing import List
 
 import rclpy
 from rclpy.node import Node
@@ -167,7 +168,7 @@ class MobileSensorBridgeNode(Node):
             10
         )
 
-        self.ip_address = self.get_local_ip()
+        self.ip_addresses = self.get_all_local_ips()
 
         # SSL Certificates Setup
         self.cert_dir = os.path.join(os.getcwd(), 'certs')
@@ -214,19 +215,39 @@ class MobileSensorBridgeNode(Node):
         self.server_thread.daemon = True
         self.server_thread.start()
 
-        self.get_logger().info(f'HTTPS server started: https://{self.ip_address}:{self.server_port}')
-        self.get_logger().info('Open the URL above in your smartphone browser.')
+        self.get_logger().info('HTTPS server started. Connect via one of the URLs below in your smartphone browser:')
+        for ip in self.ip_addresses:
+            self.get_logger().info(f'  - https://{ip}:{self.server_port}')
 
-    def get_local_ip(self) -> str:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    def get_all_local_ips(self) -> List[str]:
+        """Discovers all available IPv4 addresses on the host system."""
+        ips = []
         try:
+            # Method 1: Hostname Resolution
+            hostname = socket.gethostname()
+            addr_info = socket.getaddrinfo(hostname, None, socket.AF_INET)
+            for item in addr_info:
+                ip = item[4][0]
+                if ip not in ips and not ip.startswith('127.'):
+                    ips.append(ip)
+        except Exception:
+            pass
+
+        try:
+            # Method 2: UDP Socket Probe
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(('10.255.255.255', 1))
             ip = s.getsockname()[0]
-        except Exception:
-            ip = '127.0.0.1'
-        finally:
+            if ip not in ips and not ip.startswith('127.'):
+                ips.append(ip)
             s.close()
-        return ip
+        except Exception:
+            pass
+
+        if not ips:
+            ips = ['127.0.0.1']
+
+        return ips
 
     def generate_certificates(self) -> None:
         needs_regen = not os.path.exists(self.cert_file) or not os.path.exists(self.key_file)
@@ -236,20 +257,25 @@ class MobileSensorBridgeNode(Node):
                     ['openssl', 'x509', '-in', self.cert_file, '-text', '-noout'],
                     capture_output=True, text=True
                 )
-                if f'IP Address:{self.ip_address}' not in result.stdout:
-                    needs_regen = True
+                for ip in self.ip_addresses:
+                    if f'IP Address:{ip}' not in result.stdout:
+                        needs_regen = True
+                        break
             except Exception:
                 needs_regen = True
 
         if needs_regen:
-            self.get_logger().info('Generating self-signed SSL certificate...')
-            san = f'IP:{self.ip_address},IP:127.0.0.1,DNS:localhost'
+            self.get_logger().info('Generating self-signed SSL certificate with multi-IP SAN...')
+            san_list = [f'IP:{ip}' for ip in self.ip_addresses] + ['IP:127.0.0.1', 'DNS:localhost']
+            san_str = ','.join(san_list)
+
+            primary_ip = self.ip_addresses[0] if self.ip_addresses else '127.0.0.1'
             cmd = [
                 'openssl', 'req', '-newkey', 'rsa:2048', '-nodes',
                 '-keyout', self.key_file, '-x509', '-days', '365',
                 '-out', self.cert_file,
-                '-subj', f'/C=KR/ST=Seoul/L=Seoul/O=WROS/CN={self.ip_address}',
-                '-addext', f'subjectAltName={san}',
+                '-subj', f'/C=KR/ST=Seoul/L=Seoul/O=WROS/CN={primary_ip}',
+                '-addext', f'subjectAltName={san_str}',
                 '-addext', 'extendedKeyUsage=serverAuth',
                 '-addext', 'keyUsage=digitalSignature,keyEncipherment',
             ]
@@ -257,7 +283,7 @@ class MobileSensorBridgeNode(Node):
             if result.returncode != 0:
                 self.get_logger().error(f'Certificate generation failed: {result.stderr.decode()}')
             else:
-                self.get_logger().info('Certificate generated successfully.')
+                self.get_logger().info('Multi-IP Certificate generated successfully.')
 
     def destroy_node(self) -> None:
         self.httpd.shutdown()
