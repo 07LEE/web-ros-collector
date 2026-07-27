@@ -3,47 +3,58 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WROS Mobile Sensor Bridge</title>
+    <title>Mobile Sensor Bridge</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div id="container">
-        <h1>WROS Mobile Sensor Bridge</h1>
-        
-        <div class="video-wrapper">
+        <header>
+            <h1>Mobile Sensor Bridge</h1>
+            <div id="status">READY</div>
+        </header>
+
+        <div class="video-container">
             <video id="video" autoplay playsinline></video>
         </div>
 
         <div class="controls">
-            <button id="startBtn" class="btn">스트리밍 시작</button>
-            <button id="imuPermissionBtn" class="btn btn-secondary">IMU 센서 권한 요청</button>
+            <button id="startBtn" class="btn">START STREAMING</button>
+            <button id="imuPermissionBtn" class="btn btn-secondary">IMU PERMISSION</button>
         </div>
 
-        <div id="status">대기 중</div>
-
-        <!-- IMU 센서 실시간 수치 대시보드 -->
-        <div class="sensor-dashboard">
-            <h3>IMU Sensor Status</h3>
-            <div class="sensor-grid">
-                <div class="sensor-card">
-                    <h4>가속도 (m/s²)</h4>
-                    <div>X: <span id="accelX">0.00</span></div>
-                    <div>Y: <span id="accelY">0.00</span></div>
-                    <div>Z: <span id="accelZ">0.00</span></div>
-                </div>
-                <div class="sensor-card">
-                    <h4>각속도 (deg/s)</h4>
-                    <div>Yaw(α): <span id="gyroA">0.00</span></div>
-                    <div>Pitch(β): <span id="gyroB">0.00</span></div>
-                    <div>Roll(γ): <span id="gyroG">0.00</span></div>
-                </div>
-                <div class="sensor-card">
-                    <h4>방향 (deg)</h4>
-                    <div>Yaw(α): <span id="oriA">0.00</span></div>
-                    <div>Pitch(β): <span id="oriB">0.00</span></div>
-                    <div>Roll(γ): <span id="oriG">0.00</span></div>
-                </div>
-            </div>
+        <!-- 컴팩트 모노톤 센서 데이터 테이블 -->
+        <div class="sensor-section">
+            <div class="sensor-title">IMU REALTIME DATA</div>
+            <table class="sensor-table">
+                <thead>
+                    <tr>
+                        <th>AXIS</th>
+                        <th>ACCEL (m/s²)</th>
+                        <th>GYRO (deg/s)</th>
+                        <th>ORI (deg)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="axis-label">X / α</td>
+                        <td class="val-num" id="accelX">0.00</td>
+                        <td class="val-num" id="gyroA">0.00</td>
+                        <td class="val-num" id="oriA">0.00</td>
+                    </tr>
+                    <tr>
+                        <td class="axis-label">Y / β</td>
+                        <td class="val-num" id="accelY">0.00</td>
+                        <td class="val-num" id="gyroB">0.00</td>
+                        <td class="val-num" id="oriB">0.00</td>
+                    </tr>
+                    <tr>
+                        <td class="axis-label">Z / γ</td>
+                        <td class="val-num" id="accelZ">0.00</td>
+                        <td class="val-num" id="gyroG">0.00</td>
+                        <td class="val-num" id="oriG">0.00</td>
+                    </tr>
+                </tbody>
+            </table>
         </div>
     </div>
 
@@ -53,7 +64,6 @@
         const imuPermissionBtn = document.getElementById('imuPermissionBtn');
         const statusDiv = document.getElementById('status');
 
-        // Sensor UI Elements
         const accelXEl = document.getElementById('accelX');
         const accelYEl = document.getElementById('accelY');
         const accelZEl = document.getElementById('accelZ');
@@ -144,10 +154,10 @@
                     sendDeviceInfoAsync(deviceInfo);
                 }
 
-                statusDiv.innerText = "준비 완료";
+                statusDiv.innerText = "READY";
             } catch (err) {
                 console.error("카메라 접근 오류: ", err);
-                statusDiv.innerText = "카메라 접근 실패";
+                statusDiv.innerText = "CAMERA ERROR";
             }
         }
 
@@ -200,9 +210,9 @@
                     if (permissionState === 'granted') {
                         setupIMUSensors();
                         imuPermissionBtn.style.display = 'none';
-                        statusDiv.innerText = "IMU 센서 권한 승인됨";
+                        statusDiv.innerText = "IMU GRANTED";
                     } else {
-                        statusDiv.innerText = "IMU 권한 거부됨";
+                        statusDiv.innerText = "IMU DENIED";
                     }
                 } catch (e) {
                     console.error("IMU 권한 요청 실패:", e);
@@ -259,13 +269,13 @@
                         });
 
                         if (response.ok) {
-                            statusDiv.innerText = "센서 스트리밍 중";
+                            statusDiv.innerText = "STREAMING";
                         } else {
-                            statusDiv.innerText = "전송 오류";
+                            statusDiv.innerText = "ERROR";
                         }
                     } catch (err) {
                         console.error("업로드 오류: ", err);
-                        statusDiv.innerText = "서버 연결 끊김";
+                        statusDiv.innerText = "DISCONNECTED";
                     } finally {
                         isUploading = false;
                     }
@@ -278,13 +288,13 @@
         startBtn.addEventListener('click', () => {
             if (!streaming) {
                 streaming = true;
-                startBtn.innerText = "스트리밍 중지";
+                startBtn.innerText = "STOP STREAMING";
                 startBtn.classList.add('btn-stop');
                 animationFrameId = requestAnimationFrame(sendFrameLoop);
-                imuIntervalId = setInterval(sendIMUData, 30); // ~33Hz IMU 전송
+                imuIntervalId = setInterval(sendIMUData, 30);
             } else {
                 streaming = false;
-                startBtn.innerText = "스트리밍 시작";
+                startBtn.innerText = "START STREAMING";
                 startBtn.classList.remove('btn-stop');
                 if (animationFrameId) {
                     cancelAnimationFrame(animationFrameId);
@@ -294,7 +304,7 @@
                     clearInterval(imuIntervalId);
                     imuIntervalId = null;
                 }
-                statusDiv.innerText = "중지됨";
+                statusDiv.innerText = "STOPPED";
             }
         });
 
