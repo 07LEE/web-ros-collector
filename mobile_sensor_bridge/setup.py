@@ -13,6 +13,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'web'), glob('web/*')),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -23,7 +24,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'mobile_sensor_bridge_node = mobile_sensor_bridge.mobile_sensor_bridge_node:main'
+            'mobile_sensor_bridge_node = mobile_sensor_bridge.mobile_sensor_bridge_node:main',
+            'camera_info_publisher = mobile_sensor_bridge.camera_info_publisher:main',
         ],
     },
 )

@@ -1,10 +1,9 @@
-# Mobile Sensor Bridge Workspace
+# ros2-learning-lab
 
 A ROS 2 pipeline project that utilizes a smartphone's web browser as a camera and IMU sensor node.
 
-For detailed documentation, specifications, and instructions, please refer to [mobile_sensor_bridge/README.md](mobile_sensor_bridge/README.md).
-
----
+- Project Objective & Roadmap: [docs/project-objective.md](docs/project-objective.md)
+- Package Documentation: [mobile_sensor_bridge/README.md](mobile_sensor_bridge/README.md)
 
 ## Quick Start
 
