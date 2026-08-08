@@ -1,8 +1,7 @@
-# ros2-learning-lab
+# web-ros-collector
 
-A ROS 2 pipeline project that utilizes a smartphone's web browser as a camera and IMU sensor node.
+A high-performance Web-based ROS 2 Sensor Data Collector that streams camera frames and IMU sensor data from smartphone browsers to ROS 2 topics (`image_raw/compressed` and `imu/data_raw`).
 
-- Project Objective & Roadmap: [docs/project-objective.md](docs/project-objective.md)
 - Package Documentation: [mobile_sensor_bridge/README.md](mobile_sensor_bridge/README.md)
 
 ## Quick Start

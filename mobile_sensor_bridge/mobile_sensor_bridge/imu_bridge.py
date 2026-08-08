@@ -2,23 +2,27 @@
 
 import math
 from geometry_msgs.msg import Quaternion
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 
 
 class ImuBridge:
     """Handles IMU sensor topic publishing and coordinate/unit transformations."""
 
-    def __init__(self, node):
+    def __init__(self, node, topic_name: str = 'imu/data_raw', frame_id: str = 'phone_imu'):
         """Initializes publisher for IMU topic.
 
         Args:
             node (rclpy.node.Node): Parent ROS2 node instance.
+            topic_name (str): Topic name to publish IMU messages.
+            frame_id (str): Frame ID for header.
         """
         self.node = node
+        self.frame_id = frame_id
         self.imu_publisher = self.node.create_publisher(
             Imu,
-            '/imu/data_raw',
-            10
+            topic_name,
+            qos_profile_sensor_data
         )
 
     @staticmethod
@@ -47,7 +51,7 @@ class ImuBridge:
         """
         imu_msg = Imu()
         imu_msg.header.stamp = stamp
-        imu_msg.header.frame_id = 'phone_imu'
+        imu_msg.header.frame_id = self.frame_id
 
         # Linear Acceleration (m/s^2)
         accel = data.get('accel', {})

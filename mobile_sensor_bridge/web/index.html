@@ -264,7 +264,7 @@
                         const arrayBuffer = await blob.arrayBuffer();
                         const response = await fetch('/upload', {
                             method: 'POST',
-                            headers: { 'Content-Type': 'image/png' },
+                            headers: { 'Content-Type': 'image/jpeg' },
                             body: arrayBuffer
                         });
 
@@ -279,7 +279,7 @@
                     } finally {
                         isUploading = false;
                     }
-                }, 'image/png');
+                }, 'image/jpeg', 0.85);
             }
 
             animationFrameId = requestAnimationFrame(sendFrameLoop);

@@ -3,6 +3,7 @@
 import http.server
 import json
 import os
+import queue
 import socket
 import socketserver
 import ssl
@@ -71,25 +72,8 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 post_data = self.rfile.read(content_length)
                 data = json.loads(post_data.decode('utf-8'))
 
-                model = data.get('model', 'Unknown Device')
-                os_info = data.get('os', 'Unknown OS')
-                browser = data.get('browser', 'Unknown Browser')
-                camera_label = data.get('cameraLabel', 'Unknown Camera')
-                width = data.get('width', 0)
-                height = data.get('height', 0)
-                fps = data.get('frameRate', 0)
-
-                log_msg = (
-                    f"Connected Device -> Model: {model} | OS: {os_info} | Browser: {browser} | "
-                    f"Camera: {camera_label} ({width}x{height} @ {fps}fps)"
-                )
-
                 if self.node is not None:
-                    self.node.get_logger().info(log_msg)
-                    if self.node.device_info_publisher is not None:
-                        info_msg = String()
-                        info_msg.data = json.dumps(data)
-                        self.node.device_info_publisher.publish(info_msg)
+                    self.node.enqueue_device_info(data)
 
                 self.send_response(200)
                 self.send_header('Access-Control-Allow-Origin', '*')
@@ -105,14 +89,14 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 post_data = self.rfile.read(content_length)
                 data = json.loads(post_data.decode('utf-8'))
 
+                if self.node is not None:
+                    stamp = self.node.get_clock().now().to_msg()
+                    self.node.enqueue_imu(data, stamp)
+
                 self.send_response(200)
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(b"OK")
-
-                if self.node is not None and self.node.imu_bridge is not None:
-                    stamp = self.node.get_clock().now().to_msg()
-                    self.node.imu_bridge.handle_imu(data, stamp)
 
             except Exception:
                 self.send_response(500)
@@ -124,15 +108,15 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 post_data = self.rfile.read(content_length)
                 content_type = self.headers.get('Content-Type', '')
 
+                if self.node is not None:
+                    stamp = self.node.get_clock().now().to_msg()
+                    self.node.enqueue_upload(post_data, content_type, stamp)
+
                 self.send_response(200)
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.send_header('Connection', 'keep-alive')
                 self.end_headers()
                 self.wfile.write(b"OK")
-
-                if self.node is not None and self.node.camera_bridge is not None:
-                    stamp = self.node.get_clock().now().to_msg()
-                    self.node.camera_bridge.handle_upload(post_data, content_type, stamp)
 
             except Exception:
                 self.send_response(500)
@@ -158,14 +142,31 @@ class MobileSensorBridgeNode(Node):
     def __init__(self):
         super().__init__('mobile_sensor_bridge_node')
 
+        # Declare ROS 2 Parameters
+        self.declare_parameter('port', 8443)
+        self.declare_parameter('image_topic', 'image_raw/compressed')
+        self.declare_parameter('imu_topic', 'imu/data_raw')
+        self.declare_parameter('frame_id_camera', 'phone_camera')
+        self.declare_parameter('frame_id_imu', 'phone_imu')
+
+        self.server_port = self.get_parameter('port').get_parameter_value().integer_value
+        image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
+        imu_topic = self.get_parameter('imu_topic').get_parameter_value().string_value
+        frame_id_camera = self.get_parameter('frame_id_camera').get_parameter_value().string_value
+        frame_id_imu = self.get_parameter('frame_id_imu').get_parameter_value().string_value
+
         # Instantiate Camera and IMU Bridges
-        self.camera_bridge = CameraBridge(self)
-        self.imu_bridge = ImuBridge(self)
+        self.camera_bridge = CameraBridge(self, topic_name=image_topic, frame_id=frame_id_camera)
+        self.imu_bridge = ImuBridge(self, topic_name=imu_topic, frame_id=frame_id_imu)
+
+        # Thread-safe Publishing Queue & Spin Timer
+        self.publish_queue = queue.Queue()
+        self.create_timer(0.001, self._process_publish_queue)
 
         # Device Info Publisher
         self.device_info_publisher = self.create_publisher(
             String,
-            '/mobile_sensor_bridge/device_info',
+            'mobile_sensor_bridge/device_info',
             10
         )
 
@@ -282,6 +283,44 @@ class MobileSensorBridgeNode(Node):
                 self.get_logger().error(f'Certificate generation failed: {result.stderr.decode()}')
             else:
                 self.get_logger().info('Multi-IP Certificate generated successfully.')
+
+    def enqueue_device_info(self, data: dict) -> None:
+        self.publish_queue.put((self._publish_device_info, (data,)))
+
+    def enqueue_imu(self, data: dict, stamp) -> None:
+        self.publish_queue.put((self.imu_bridge.handle_imu, (data, stamp)))
+
+    def enqueue_upload(self, post_data: bytes, content_type: str, stamp) -> None:
+        self.publish_queue.put((self.camera_bridge.handle_upload, (post_data, content_type, stamp)))
+
+    def _publish_device_info(self, data: dict) -> None:
+        model = data.get('model', 'Unknown Device')
+        os_info = data.get('os', 'Unknown OS')
+        browser = data.get('browser', 'Unknown Browser')
+        camera_label = data.get('cameraLabel', 'Unknown Camera')
+        width = data.get('width', 0)
+        height = data.get('height', 0)
+        fps = data.get('frameRate', 0)
+
+        log_msg = (
+            f"Connected Device -> Model: {model} | OS: {os_info} | Browser: {browser} | "
+            f"Camera: {camera_label} ({width}x{height} @ {fps}fps)"
+        )
+        self.get_logger().info(log_msg)
+        if self.device_info_publisher is not None:
+            info_msg = String()
+            info_msg.data = json.dumps(data)
+            self.device_info_publisher.publish(info_msg)
+
+    def _process_publish_queue(self) -> None:
+        while not self.publish_queue.empty():
+            try:
+                func, args = self.publish_queue.get_nowait()
+                func(*args)
+            except queue.Empty:
+                break
+            except Exception as e:
+                self.get_logger().error(f"Error processing publish queue: {e}")
 
     def destroy_node(self) -> None:
         self.httpd.shutdown()

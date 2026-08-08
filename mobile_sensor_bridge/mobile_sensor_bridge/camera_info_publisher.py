@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage, Image, CameraInfo
 from tf2_ros import StaticTransformBroadcaster
 from geometry_msgs.msg import TransformStamped
@@ -14,13 +15,13 @@ class CameraInfoPublisherNode(Node):
         
         self.sub_compressed = self.create_subscription(
             CompressedImage,
-            '/image_raw/compressed',
+            'image_raw/compressed',
             self.image_callback,
-            10
+            qos_profile_sensor_data
         )
         
-        self.pub_raw = self.create_publisher(Image, '/image_raw', 10)
-        self.pub_info = self.create_publisher(CameraInfo, '/camera_info', 10)
+        self.pub_raw = self.create_publisher(Image, 'image_raw', qos_profile_sensor_data)
+        self.pub_info = self.create_publisher(CameraInfo, 'camera_info', qos_profile_sensor_data)
         self.tf_broadcaster = StaticTransformBroadcaster(self)
         
         self.publish_static_transforms()
