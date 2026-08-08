@@ -223,6 +223,31 @@
             }
         }
 
+        let clockOffsetMs = 0;
+
+        async function syncTimeWithServer() {
+            try {
+                const t0 = performance.now() + performance.timeOrigin;
+                const res = await fetch('/sync_time');
+                const t1 = performance.now() + performance.timeOrigin;
+                if (res.ok) {
+                    const data = await res.json();
+                    const serverTimeMs = data.server_time_ns / 1e6;
+                    const rtt = t1 - t0;
+                    const estimatedServerTimeAtT1 = serverTimeMs + (rtt / 2);
+                    clockOffsetMs = estimatedServerTimeAtT1 - t1;
+                    console.log(`Time synced: RTT=${rtt.toFixed(2)}ms, clockOffset=${clockOffsetMs.toFixed(2)}ms`);
+                }
+            } catch (e) {
+                console.warn("Time sync failed:", e);
+            }
+        }
+
+        function getSyncedTimestampMs() {
+            const localNow = performance.now() + performance.timeOrigin;
+            return localNow + clockOffsetMs;
+        }
+
         function sendDeviceInfoAsync(info) {
             fetch('/device_info', {
                 method: 'POST',
@@ -235,10 +260,19 @@
             if (!streaming || isImuUploading) return;
             isImuUploading = true;
 
+            const clientTsMs = getSyncedTimestampMs();
+            const payload = {
+                ...imuData,
+                clientTimestampMs: clientTsMs
+            };
+
             fetch('/imu', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(imuData)
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Client-Timestamp-Ms': clientTsMs.toString()
+                },
+                body: JSON.stringify(payload)
             }).catch(err => console.warn("IMU 데이터 전송 실패:", err))
             .finally(() => {
                 isImuUploading = false;
@@ -261,10 +295,14 @@
                         return;
                     }
                     try {
+                        const clientTsMs = getSyncedTimestampMs();
                         const arrayBuffer = await blob.arrayBuffer();
                         const response = await fetch('/upload', {
                             method: 'POST',
-                            headers: { 'Content-Type': 'image/jpeg' },
+                            headers: {
+                                'Content-Type': 'image/jpeg',
+                                'X-Client-Timestamp-Ms': clientTsMs.toString()
+                            },
                             body: arrayBuffer
                         });
 
@@ -312,6 +350,7 @@
 
         window.addEventListener('load', () => {
             initCamera();
+            syncTimeWithServer();
             if (typeof DeviceMotionEvent === 'undefined' || typeof DeviceMotionEvent.requestPermission !== 'function') {
                 imuPermissionBtn.style.display = 'none';
                 setupIMUSensors();

@@ -31,7 +31,22 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        """Handles HTTP GET requests to serve static web assets."""
+        """Handles HTTP GET requests to serve static web assets or perform time sync."""
+        if self.path == '/sync_time':
+            try:
+                current_time_ns = self.node.get_clock().now().nanoseconds if self.node else 0
+                response_data = json.dumps({'server_time_ns': current_time_ns}).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(response_data)
+                return
+            except Exception:
+                self.send_response(500)
+                self.end_headers()
+                return
+
         filename = 'index.html' if self.path in ('/', '/index.html') else self.path.lstrip('/')
         web_dir = os.path.dirname(self.html_filepath)
         target_path = os.path.abspath(os.path.join(web_dir, filename))
@@ -64,6 +79,23 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def parse_stamp(self, client_ts_ms_str: str):
+        """Parses client timestamp in milliseconds or falls back to node clock."""
+        if client_ts_ms_str and self.node is not None:
+            try:
+                client_ts_ms = float(client_ts_ms_str)
+                client_ts_ns = int(client_ts_ms * 1e6)
+                sec = client_ts_ns // 1_000_000_000
+                nanosec = client_ts_ns % 1_000_000_000
+                from builtin_interfaces.msg import Time
+                stamp = Time()
+                stamp.sec = sec
+                stamp.nanosec = nanosec
+                return stamp
+            except Exception:
+                pass
+        return self.node.get_clock().now().to_msg() if self.node else None
+
     def do_POST(self):
         """Handles HTTP POST requests and routes payloads to CameraBridge or ImuBridge."""
         if self.path == '/device_info':
@@ -90,7 +122,8 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(post_data.decode('utf-8'))
 
                 if self.node is not None:
-                    stamp = self.node.get_clock().now().to_msg()
+                    client_ts_str = self.headers.get('X-Client-Timestamp-Ms') or str(data.get('clientTimestampMs', ''))
+                    stamp = self.parse_stamp(client_ts_str)
                     self.node.enqueue_imu(data, stamp)
 
                 self.send_response(200)
@@ -109,7 +142,8 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 content_type = self.headers.get('Content-Type', '')
 
                 if self.node is not None:
-                    stamp = self.node.get_clock().now().to_msg()
+                    client_ts_str = self.headers.get('X-Client-Timestamp-Ms')
+                    stamp = self.parse_stamp(client_ts_str)
                     self.node.enqueue_upload(post_data, content_type, stamp)
 
                 self.send_response(200)
