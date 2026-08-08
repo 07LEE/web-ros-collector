@@ -14,6 +14,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from ament_index_python.packages import get_package_share_directory
 from mobile_sensor_bridge.camera_bridge import CameraBridge
 from mobile_sensor_bridge.imu_bridge import ImuBridge
 
@@ -171,7 +172,8 @@ class MobileSensorBridgeNode(Node):
         self.ip_addresses = self.get_all_local_ips()
 
         # SSL Certificates Setup
-        self.cert_dir = os.path.join(os.getcwd(), 'certs')
+        user_ros_dir = os.path.expanduser('~/.ros')
+        self.cert_dir = os.path.join(user_ros_dir, 'mobile_sensor_bridge_certs')
         os.makedirs(self.cert_dir, exist_ok=True)
         self.cert_file = os.path.join(self.cert_dir, 'cert.pem')
         self.key_file = os.path.join(self.cert_dir, 'key.pem')
@@ -179,16 +181,12 @@ class MobileSensorBridgeNode(Node):
         self.generate_certificates()
 
         # Web Assets Location Resolution
-        self.html_filepath = os.path.join(
-            os.getcwd(),
-            'mobile_sensor_bridge',
-            'web',
-            'index.html'
-        )
-        if not os.path.exists(self.html_filepath):
+        try:
+            share_dir = get_package_share_directory('mobile_sensor_bridge')
+            self.html_filepath = os.path.join(share_dir, 'web', 'index.html')
+        except Exception:
             self.html_filepath = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)),
-                'share',
+                os.getcwd(),
                 'mobile_sensor_bridge',
                 'web',
                 'index.html'
