@@ -323,6 +323,16 @@
             animationFrameId = requestAnimationFrame(sendFrameLoop);
         }
 
+        function stopRecordingBeacon() {
+            if (streaming) {
+                try {
+                    navigator.sendBeacon('/record/stop');
+                } catch (e) {
+                    fetch('/record/stop', { method: 'POST', keepalive: true }).catch(() => {});
+                }
+            }
+        }
+
         startBtn.addEventListener('click', () => {
             if (!streaming) {
                 streaming = true;
@@ -330,6 +340,7 @@
                 startBtn.classList.add('btn-stop');
                 animationFrameId = requestAnimationFrame(sendFrameLoop);
                 imuIntervalId = setInterval(sendIMUData, 30);
+                fetch('/record/start', { method: 'POST' }).catch(err => console.warn("녹화 시작 요청 실패:", err));
             } else {
                 streaming = false;
                 startBtn.innerText = "START STREAMING";
@@ -343,10 +354,14 @@
                     imuIntervalId = null;
                 }
                 statusDiv.innerText = "STOPPED";
+                fetch('/record/stop', { method: 'POST' }).catch(err => console.warn("녹화 종료 요청 실패:", err));
             }
         });
 
         imuPermissionBtn.addEventListener('click', requestIMUPermission);
+
+        window.addEventListener('beforeunload', stopRecordingBeacon);
+        window.addEventListener('pagehide', stopRecordingBeacon);
 
         window.addEventListener('load', () => {
             initCamera();

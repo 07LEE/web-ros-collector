@@ -9,6 +9,7 @@ import socketserver
 import ssl
 import subprocess
 import threading
+import time
 from typing import List
 
 import rclpy
@@ -156,9 +157,34 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(500)
                 self.end_headers()
 
+        elif self.path == '/record/start':
+            try:
+                if self.node is not None:
+                    self.node.start_bag_recording()
+                self.send_response(200)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(b"OK")
+            except Exception:
+                self.send_response(500)
+                self.end_headers()
+
+        elif self.path == '/record/stop':
+            try:
+                if self.node is not None:
+                    self.node.stop_bag_recording()
+                self.send_response(200)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(b"OK")
+            except Exception:
+                self.send_response(500)
+                self.end_headers()
+
 
 class SecureHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """Multi-threaded HTTPS server wrapping client sockets individually per connection."""
+    allow_reuse_address = True
 
     def __init__(self, server_address, request_handler_class, ssl_context):
         super().__init__(server_address, request_handler_class)
@@ -193,9 +219,24 @@ class MobileSensorBridgeNode(Node):
         self.camera_bridge = CameraBridge(self, topic_name=image_topic, frame_id=frame_id_camera)
         self.imu_bridge = ImuBridge(self, topic_name=imu_topic, frame_id=frame_id_imu)
 
-        # Thread-safe Publishing Queue & Spin Timer
+        # Rosbag2 Automatic Recording Setup
+        self.record_process = None
+        self.last_data_received_time = 0.0
+        workspace_root = os.getcwd()
+        try:
+            share_dir = get_package_share_directory('mobile_sensor_bridge')
+            possible_root = os.path.abspath(os.path.join(share_dir, '..', '..', '..', '..'))
+            if os.path.exists(os.path.join(possible_root, 'src')) or os.path.exists(os.path.join(possible_root, 'install')):
+                workspace_root = possible_root
+        except Exception:
+            pass
+        self.bag_dir = os.path.join(workspace_root, 'data')
+        os.makedirs(self.bag_dir, exist_ok=True)
+
+        # Thread-safe Publishing Queue & Spin Timers
         self.publish_queue = queue.Queue()
         self.create_timer(0.001, self._process_publish_queue)
+        self.create_timer(1.0, self._check_heartbeat_timeout)
 
         # Device Info Publisher
         self.device_info_publisher = self.create_publisher(
@@ -322,10 +363,19 @@ class MobileSensorBridgeNode(Node):
         self.publish_queue.put((self._publish_device_info, (data,)))
 
     def enqueue_imu(self, data: dict, stamp) -> None:
+        self.last_data_received_time = time.time()
         self.publish_queue.put((self.imu_bridge.handle_imu, (data, stamp)))
 
     def enqueue_upload(self, post_data: bytes, content_type: str, stamp) -> None:
+        self.last_data_received_time = time.time()
         self.publish_queue.put((self.camera_bridge.handle_upload, (post_data, content_type, stamp)))
+
+    def _check_heartbeat_timeout(self) -> None:
+        """Automatically stops rosbag2 recording if client stream disconnects or stops sending data for over 3 seconds."""
+        if self.record_process is not None:
+            if time.time() - self.last_data_received_time > 3.0:
+                self.get_logger().info('No incoming sensor data for 3 seconds. Auto-closing rosbag2 recording...')
+                self.stop_bag_recording()
 
     def _publish_device_info(self, data: dict) -> None:
         model = data.get('model', 'Unknown Device')
@@ -356,7 +406,72 @@ class MobileSensorBridgeNode(Node):
             except Exception as e:
                 self.get_logger().error(f"Error processing publish queue: {e}")
 
+    def start_bag_recording(self) -> None:
+        """Starts automatic rosbag2 recording subprocess with QoS overrides for Best Effort sensor topics."""
+        if self.record_process is not None:
+            return
+        import datetime
+        timestamp_str = datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+        output_path = os.path.join(self.bag_dir, f'rosbag2_{timestamp_str}')
+
+        qos_override_file = os.path.join(self.bag_dir, 'qos_overrides.yaml')
+        if not os.path.exists(qos_override_file):
+            qos_content = (
+                "/image_raw/compressed:\n"
+                "  reliability: best_effort\n"
+                "  durability: volatile\n"
+                "  history: keep_last\n"
+                "  depth: 10\n"
+                "/imu/data_raw:\n"
+                "  reliability: best_effort\n"
+                "  durability: volatile\n"
+                "  history: keep_last\n"
+                "  depth: 10\n"
+                "/camera_info:\n"
+                "  reliability: best_effort\n"
+                "  durability: volatile\n"
+                "  history: keep_last\n"
+                "  depth: 10\n"
+            )
+            with open(qos_override_file, 'w') as f:
+                f.write(qos_content)
+
+        cmd = [
+            'ros2', 'bag', 'record',
+            '-o', output_path,
+            '--qos-profile-overrides-path', qos_override_file,
+            '--topics',
+            'image_raw/compressed',
+            'imu/data_raw',
+            'mobile_sensor_bridge/device_info',
+            'camera_info'
+        ]
+        try:
+            self.record_process = subprocess.Popen(cmd)
+            self.get_logger().info(f'Started automatic rosbag2 recording: {output_path}')
+        except Exception as e:
+            self.get_logger().error(f'Failed to start rosbag2 recording: {e}')
+
+    def stop_bag_recording(self) -> None:
+        """Stops active rosbag2 recording process safely using SIGINT for DB flush."""
+        if self.record_process is None:
+            return
+        try:
+            import signal
+            self.record_process.send_signal(signal.SIGINT)
+            self.record_process.wait(timeout=5)
+            self.get_logger().info('Stopped automatic rosbag2 recording successfully.')
+        except Exception as e:
+            self.get_logger().warn(f'rosbag2 process cleanup warning: {e}')
+            try:
+                self.record_process.kill()
+            except Exception:
+                pass
+        finally:
+            self.record_process = None
+
     def destroy_node(self) -> None:
+        self.stop_bag_recording()
         self.httpd.shutdown()
         super().destroy_node()
 
