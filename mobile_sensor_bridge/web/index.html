@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mobile Sensor Bridge</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="container">
+        <header>
+            <h1>Mobile Sensor Bridge</h1>
+            <div id="status">READY</div>
+        </header>
+
+        <div class="video-container">
+            <video id="video" autoplay playsinline></video>
+        </div>
+
+        <div class="controls">
+            <button id="startBtn" class="btn">START STREAMING</button>
+            <button id="imuPermissionBtn" class="btn btn-secondary">IMU PERMISSION</button>
+        </div>
+
+        <!-- Compact Monotone Sensor Data Table -->
+        <div class="sensor-section">
+            <div class="sensor-title">ROBOT SENSORS & SYSTEM</div>
+            <table class="sensor-table">
+                <thead>
+                    <tr>
+                        <th>SENSOR</th>
+                        <th>METRIC</th>
+                        <th>VALUE</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="axis-label">BATTERY</td>
+                        <td>LEVEL / CHARGING</td>
+                        <td class="val-num" id="batteryVal">-- %</td>
+                    </tr>
+                    <tr>
+                        <td class="axis-label">GPS</td>
+                        <td>LAT / LON</td>
+                        <td class="val-num" id="gpsCoordVal">-- / --</td>
+                    </tr>
+                    <tr>
+                        <td class="axis-label">GPS ACC</td>
+                        <td>ACCURACY (m)</td>
+                        <td class="val-num" id="gpsAccVal">-- m</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="sensor-section">
+            <div class="sensor-title">IMU REALTIME DATA</div>
+            <table class="sensor-table">
+                <thead>
+                    <tr>
+                        <th>AXIS</th>
+                        <th>ACCEL (m/s²)</th>
+                        <th>GYRO (deg/s)</th>
+                        <th>ORI (deg)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="axis-label">X / α</td>
+                        <td class="val-num" id="accelX">0.00</td>
+                        <td class="val-num" id="gyroA">0.00</td>
+                        <td class="val-num" id="oriA">0.00</td>
+                    </tr>
+                    <tr>
+                        <td class="axis-label">Y / β</td>
+                        <td class="val-num" id="accelY">0.00</td>
+                        <td class="val-num" id="gyroB">0.00</td>
+                        <td class="val-num" id="oriB">0.00</td>
+                    </tr>
+                    <tr>
+                        <td class="axis-label">Z / γ</td>
+                        <td class="val-num" id="accelZ">0.00</td>
+                        <td class="val-num" id="gyroG">0.00</td>
+                        <td class="val-num" id="oriG">0.00</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const startBtn = document.getElementById('startBtn');
+        const imuPermissionBtn = document.getElementById('imuPermissionBtn');
+        const statusDiv = document.getElementById('status');
+
+        const accelXEl = document.getElementById('accelX');
+        const accelYEl = document.getElementById('accelY');
+        const accelZEl = document.getElementById('accelZ');
+        const gyroAEl = document.getElementById('gyroA');
+        const gyroBEl = document.getElementById('gyroB');
+        const gyroGEl = document.getElementById('gyroG');
+        const oriAEl = document.getElementById('oriA');
+        const oriBEl = document.getElementById('oriB');
+        const oriGEl = document.getElementById('oriG');
+
+        const batteryValEl = document.getElementById('batteryVal');
+        const gpsCoordValEl = document.getElementById('gpsCoordVal');
+        const gpsAccValEl = document.getElementById('gpsAccVal');
+
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+
+        let mediaStream = null;
+        let streaming = false;
+        let isUploading = false;
+        let isImuUploading = false;
+        let animationFrameId = null;
+        let imuIntervalId = null;
+        let batteryIntervalId = null;
+        let gpsIntervalId = null;
+
+        const imuData = {
+            accel: { x: 0, y: 0, z: 0 },
+            gyro: { alpha: 0, beta: 0, gamma: 0 },
+            orientation: { alpha: 0, beta: 0, gamma: 0 }
+        };
+
+        const batteryData = { level: 1.0, charging: false };
+        const gpsData = { latitude: 0.0, longitude: 0.0, altitude: 0.0, accuracy: 0.0 };
+
+        function setupBatterySensor() {
+            if (navigator.getBattery) {
+                navigator.getBattery().then(battery => {
+                    const updateBattery = () => {
+                        batteryData.level = battery.level;
+                        batteryData.charging = battery.charging;
+                        if (batteryValEl) {
+                            batteryValEl.innerText = `${Math.round(battery.level * 100)}% ${battery.charging ? '(CHG)' : ''}`;
+                        }
+                    };
+                    updateBattery();
+                    battery.addEventListener('levelchange', updateBattery);
+                    battery.addEventListener('chargingchange', updateBattery);
+                }).catch(err => console.warn("Battery API error:", err));
+            }
+        }
+
+        function sendBatteryData() {
+            if (!streaming) return;
+            const clientTsMs = getSyncedTimestampMs();
+            fetch('/battery', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Client-Timestamp-Ms': clientTsMs.toString()
+                },
+                body: JSON.stringify({ ...batteryData, clientTimestampMs: clientTsMs })
+            }).catch(err => console.warn("Battery send failed:", err));
+        }
+
+        function setupGPSSensor() {
+            if ('geolocation' in navigator) {
+                navigator.geolocation.watchPosition(
+                    (pos) => {
+                        gpsData.latitude = pos.coords.latitude;
+                        gpsData.longitude = pos.coords.longitude;
+                        gpsData.altitude = pos.coords.altitude || 0.0;
+                        gpsData.accuracy = pos.coords.accuracy || 0.0;
+
+                        if (gpsCoordValEl) {
+                            gpsCoordValEl.innerText = `${pos.coords.latitude.toFixed(4)} / ${pos.coords.longitude.toFixed(4)}`;
+                        }
+                        if (gpsAccValEl) {
+                            gpsAccValEl.innerText = `${pos.coords.accuracy.toFixed(1)} m`;
+                        }
+                    },
+                    (err) => console.warn("GPS Geolocation error:", err),
+                    { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+                );
+            }
+        }
+
+        function sendGPSData() {
+            if (!streaming) return;
+            const clientTsMs = getSyncedTimestampMs();
+            fetch('/gps', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Client-Timestamp-Ms': clientTsMs.toString()
+                },
+                body: JSON.stringify({ ...gpsData, clientTimestampMs: clientTsMs })
+            }).catch(err => console.warn("GPS send failed:", err));
+        }
+
+        function parseFastDeviceInfo() {
+            let model = "Unknown Device";
+            let os = "Unknown OS";
+            let browser = "Unknown Browser";
+
+            const ua = navigator.userAgent;
+
+            if (/iPhone/i.test(ua)) {
+                model = "Apple iPhone";
+                os = "iOS";
+            } else if (/iPad/i.test(ua)) {
+                model = "Apple iPad";
+                os = "iOS";
+            } else if (/Android/i.test(ua)) {
+                const match = ua.match(/Android\s+[\d\.]+;\s*([^;\)]+)/i);
+                model = (match && match[1]) ? match[1].trim() : "Android Device";
+                os = "Android";
+            } else if (/Macintosh/i.test(ua)) {
+                model = "Mac Device";
+                os = "macOS";
+            } else if (/Windows/i.test(ua)) {
+                model = "Windows PC";
+                os = "Windows";
+            } else if (/Linux/i.test(ua)) {
+                model = "Linux PC";
+                os = "Linux";
+            }
+
+            if (/Chrome/i.test(ua) && !/Edg/i.test(ua)) browser = "Chrome";
+            else if (/Safari/i.test(ua) && !/Chrome/i.test(ua)) browser = "Safari";
+            else if (/Firefox/i.test(ua)) browser = "Firefox";
+            else if (/Edg/i.test(ua)) browser = "Edge";
+
+            return { model, os, browser, rawUserAgent: ua };
+        }
+
+        async function initCamera() {
+            try {
+                const deviceInfo = parseFastDeviceInfo();
+
+                const constraints = {
+                    video: {
+                        facingMode: { ideal: 'environment' },
+                        width: { ideal: 3840, max: 4096 },
+                        height: { ideal: 2160, max: 2160 },
+                        frameRate: { ideal: 60 }
+                    },
+                    audio: false
+                };
+
+                mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = mediaStream;
+
+                const videoTrack = mediaStream.getVideoTracks()[0];
+                if (videoTrack) {
+                    const settings = videoTrack.getSettings();
+                    deviceInfo.cameraLabel = videoTrack.label || "Default Camera";
+                    deviceInfo.width = settings.width;
+                    deviceInfo.height = settings.height;
+                    deviceInfo.frameRate = settings.frameRate;
+
+                    sendDeviceInfoAsync(deviceInfo);
+                }
+
+                statusDiv.innerText = "READY";
+            } catch (err) {
+                console.error("Camera access error: ", err);
+                statusDiv.innerText = "CAMERA ERROR";
+            }
+        }
+
+        function setupIMUSensors() {
+            if (window.DeviceMotionEvent) {
+                window.addEventListener('devicemotion', (event) => {
+                    const acc = event.accelerationIncludingGravity || event.acceleration;
+                    if (acc) {
+                        imuData.accel.x = acc.x || 0;
+                        imuData.accel.y = acc.y || 0;
+                        imuData.accel.z = acc.z || 0;
+                    }
+                    if (event.rotationRate) {
+                        imuData.gyro.alpha = event.rotationRate.alpha || 0;
+                        imuData.gyro.beta = event.rotationRate.beta || 0;
+                        imuData.gyro.gamma = event.rotationRate.gamma || 0;
+                    }
+                    updateIMUDashboardUI();
+                });
+            }
+
+            if (window.DeviceOrientationEvent) {
+                window.addEventListener('deviceorientation', (event) => {
+                    imuData.orientation.alpha = event.alpha || 0;
+                    imuData.orientation.beta = event.beta || 0;
+                    imuData.orientation.gamma = event.gamma || 0;
+                    updateIMUDashboardUI();
+                });
+            }
+        }
+
+        function updateIMUDashboardUI() {
+            accelXEl.innerText = imuData.accel.x.toFixed(2);
+            accelYEl.innerText = imuData.accel.y.toFixed(2);
+            accelZEl.innerText = imuData.accel.z.toFixed(2);
+
+            gyroAEl.innerText = imuData.gyro.alpha.toFixed(2);
+            gyroBEl.innerText = imuData.gyro.beta.toFixed(2);
+            gyroGEl.innerText = imuData.gyro.gamma.toFixed(2);
+
+            oriAEl.innerText = imuData.orientation.alpha.toFixed(2);
+            oriBEl.innerText = imuData.orientation.beta.toFixed(2);
+            oriGEl.innerText = imuData.orientation.gamma.toFixed(2);
+        }
+
+        async function requestIMUPermission() {
+            if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                try {
+                    const permissionState = await DeviceMotionEvent.requestPermission();
+                    if (permissionState === 'granted') {
+                        setupIMUSensors();
+                        imuPermissionBtn.style.display = 'none';
+                        statusDiv.innerText = "IMU GRANTED";
+                    } else {
+                        statusDiv.innerText = "IMU DENIED";
+                    }
+                } catch (e) {
+                    console.error("Failed to request IMU permission:", e);
+                }
+            } else {
+                setupIMUSensors();
+                imuPermissionBtn.style.display = 'none';
+            }
+        }
+
+        let clockOffsetMs = 0;
+
+        async function syncTimeWithServer() {
+            try {
+                const t0 = performance.now() + performance.timeOrigin;
+                const res = await fetch('/sync_time');
+                const t1 = performance.now() + performance.timeOrigin;
+                if (res.ok) {
+                    const data = await res.json();
+                    const serverTimeMs = data.server_time_ns / 1e6;
+                    const rtt = t1 - t0;
+                    const estimatedServerTimeAtT1 = serverTimeMs + (rtt / 2);
+                    clockOffsetMs = estimatedServerTimeAtT1 - t1;
+                    console.log(`Time synced: RTT=${rtt.toFixed(2)}ms, clockOffset=${clockOffsetMs.toFixed(2)}ms`);
+                }
+            } catch (e) {
+                console.warn("Time sync failed:", e);
+            }
+        }
+
+        function getSyncedTimestampMs() {
+            const localNow = performance.now() + performance.timeOrigin;
+            return localNow + clockOffsetMs;
+        }
+
+        function sendDeviceInfoAsync(info) {
+            fetch('/device_info', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(info)
+            }).catch(err => console.warn("Failed to send device info:", err));
+        }
+
+        function sendIMUData() {
+            if (!streaming || isImuUploading) return;
+            isImuUploading = true;
+
+            const clientTsMs = getSyncedTimestampMs();
+            const payload = {
+                ...imuData,
+                clientTimestampMs: clientTsMs
+            };
+
+            fetch('/imu', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Client-Timestamp-Ms': clientTsMs.toString()
+                },
+                body: JSON.stringify(payload)
+            }).catch(err => console.warn("Failed to send IMU data:", err))
+            .finally(() => {
+                isImuUploading = false;
+            });
+        }
+
+        function sendFrameLoop() {
+            if (!streaming) return;
+
+            if (!isUploading && video.videoWidth > 0 && video.videoHeight > 0) {
+                isUploading = true;
+
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                canvas.toBlob(async (blob) => {
+                    if (!blob) {
+                        isUploading = false;
+                        return;
+                    }
+                    try {
+                        const clientTsMs = getSyncedTimestampMs();
+                        const arrayBuffer = await blob.arrayBuffer();
+                        const response = await fetch('/upload', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'image/jpeg',
+                                'X-Client-Timestamp-Ms': clientTsMs.toString()
+                            },
+                            body: arrayBuffer
+                        });
+
+                        if (response.ok) {
+                            statusDiv.innerText = "STREAMING";
+                        } else {
+                            statusDiv.innerText = "ERROR";
+                        }
+                    } catch (err) {
+                        console.error("Upload error: ", err);
+                        statusDiv.innerText = "DISCONNECTED";
+                    } finally {
+                        isUploading = false;
+                    }
+                }, 'image/jpeg', 0.85);
+            }
+
+            animationFrameId = requestAnimationFrame(sendFrameLoop);
+        }
+
+        startBtn.addEventListener('click', () => {
+            if (!streaming) {
+                streaming = true;
+                startBtn.innerText = "STOP STREAMING";
+                startBtn.classList.add('btn-stop');
+                animationFrameId = requestAnimationFrame(sendFrameLoop);
+                imuIntervalId = setInterval(sendIMUData, 30);
+
+                // Send immediate first packet for Battery and GPS
+                sendBatteryData();
+                sendGPSData();
+
+                batteryIntervalId = setInterval(sendBatteryData, 1000);
+                gpsIntervalId = setInterval(sendGPSData, 1000);
+                fetch('/record/start', { method: 'POST' }).catch(err => console.warn("Failed to request recording start:", err));
+            } else {
+                streaming = false;
+                startBtn.innerText = "START STREAMING";
+                startBtn.classList.remove('btn-stop');
+                if (animationFrameId) {
+                    cancelAnimationFrame(animationFrameId);
+                    animationFrameId = null;
+                }
+                if (imuIntervalId) {
+                    clearInterval(imuIntervalId);
+                    imuIntervalId = null;
+                }
+                if (batteryIntervalId) {
+                    clearInterval(batteryIntervalId);
+                    batteryIntervalId = null;
+                }
+                if (gpsIntervalId) {
+                    clearInterval(gpsIntervalId);
+                    gpsIntervalId = null;
+                }
+                statusDiv.innerText = "STOPPED";
+                fetch('/record/stop', { method: 'POST' }).catch(err => console.warn("Failed to request recording stop:", err));
+            }
+        });
+
+        imuPermissionBtn.addEventListener('click', requestIMUPermission);
+
+        window.addEventListener('load', () => {
+            initCamera();
+            syncTimeWithServer();
+            setupBatterySensor();
+            setupGPSSensor();
+            if (typeof DeviceMotionEvent === 'undefined' || typeof DeviceMotionEvent.requestPermission !== 'function') {
+                imuPermissionBtn.style.display = 'none';
+                setupIMUSensors();
+            }
+        });
+    </script>
+</body>
+</html>

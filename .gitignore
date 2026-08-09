@@ -3,6 +3,9 @@ build/
 install/
 log/
 
+# Recorded datasets
+data/
+
 # SSL certificates (local environment only)
 certs/
 

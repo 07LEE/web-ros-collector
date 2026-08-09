@@ -1,0 +1,159 @@
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: #000000;
+    color: #ffffff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 12px;
+}
+
+#container {
+    width: 100%;
+    max-width: 480px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #222222;
+    padding-bottom: 8px;
+}
+
+h1 {
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: #ffffff;
+}
+
+#status {
+    font-size: 0.75rem;
+    font-family: "Courier New", Courier, monospace;
+    padding: 3px 8px;
+    background-color: #111111;
+    border: 1px solid #333333;
+    border-radius: 4px;
+    color: #aaaaaa;
+}
+
+.video-container {
+    width: 100%;
+    background-color: #050505;
+    border: 1px solid #222222;
+    border-radius: 6px;
+    overflow: hidden;
+    aspect-ratio: 16 / 9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.controls {
+    display: flex;
+    gap: 8px;
+}
+
+.btn {
+    flex: 1;
+    background-color: #ffffff;
+    color: #000000;
+    border: 1px solid #ffffff;
+    padding: 10px 14px;
+    font-size: 0.85rem;
+    font-weight: 700;
+    font-family: "Courier New", Courier, monospace;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.btn:active {
+    background-color: #cccccc;
+}
+
+.btn-secondary {
+    background-color: #111111;
+    color: #ffffff;
+    border: 1px solid #333333;
+}
+
+.btn-stop {
+    background-color: #111111;
+    color: #ff4444;
+    border: 1px solid #ff4444;
+}
+
+.sensor-section {
+    background-color: #080808;
+    border: 1px solid #222222;
+    border-radius: 6px;
+    padding: 10px;
+}
+
+.sensor-title {
+    font-size: 0.75rem;
+    font-family: "Courier New", Courier, monospace;
+    color: #777777;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.sensor-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 0.8rem;
+}
+
+.sensor-table th {
+    text-align: right;
+    padding: 6px 8px;
+    color: #666666;
+    font-weight: 400;
+    font-size: 0.7rem;
+    border-bottom: 1px solid #1a1a1a;
+}
+
+.sensor-table th:first-child {
+    text-align: left;
+}
+
+.sensor-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #141414;
+}
+
+.sensor-table tr:last-child td {
+    border-bottom: none;
+}
+
+.axis-label {
+    text-align: left;
+    color: #888888;
+    font-weight: bold;
+}
+
+.val-num {
+    text-align: right;
+    color: #ffffff;
+    font-weight: 600;
+}
