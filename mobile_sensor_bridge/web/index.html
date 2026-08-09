@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ko">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -22,7 +22,37 @@
             <button id="imuPermissionBtn" class="btn btn-secondary">IMU PERMISSION</button>
         </div>
 
-        <!-- 컴팩트 모노톤 센서 데이터 테이블 -->
+        <!-- Compact Monotone Sensor Data Table -->
+        <div class="sensor-section">
+            <div class="sensor-title">ROBOT SENSORS & SYSTEM</div>
+            <table class="sensor-table">
+                <thead>
+                    <tr>
+                        <th>SENSOR</th>
+                        <th>METRIC</th>
+                        <th>VALUE</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="axis-label">BATTERY</td>
+                        <td>LEVEL / CHARGING</td>
+                        <td class="val-num" id="batteryVal">-- %</td>
+                    </tr>
+                    <tr>
+                        <td class="axis-label">GPS</td>
+                        <td>LAT / LON</td>
+                        <td class="val-num" id="gpsCoordVal">-- / --</td>
+                    </tr>
+                    <tr>
+                        <td class="axis-label">GPS ACC</td>
+                        <td>ACCURACY (m)</td>
+                        <td class="val-num" id="gpsAccVal">-- m</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
         <div class="sensor-section">
             <div class="sensor-title">IMU REALTIME DATA</div>
             <table class="sensor-table">
@@ -74,6 +104,10 @@
         const oriBEl = document.getElementById('oriB');
         const oriGEl = document.getElementById('oriG');
 
+        const batteryValEl = document.getElementById('batteryVal');
+        const gpsCoordValEl = document.getElementById('gpsCoordVal');
+        const gpsAccValEl = document.getElementById('gpsAccVal');
+
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
 
@@ -83,12 +117,82 @@
         let isImuUploading = false;
         let animationFrameId = null;
         let imuIntervalId = null;
+        let batteryIntervalId = null;
+        let gpsIntervalId = null;
 
         const imuData = {
             accel: { x: 0, y: 0, z: 0 },
             gyro: { alpha: 0, beta: 0, gamma: 0 },
             orientation: { alpha: 0, beta: 0, gamma: 0 }
         };
+
+        const batteryData = { level: 1.0, charging: false };
+        const gpsData = { latitude: 0.0, longitude: 0.0, altitude: 0.0, accuracy: 0.0 };
+
+        function setupBatterySensor() {
+            if (navigator.getBattery) {
+                navigator.getBattery().then(battery => {
+                    const updateBattery = () => {
+                        batteryData.level = battery.level;
+                        batteryData.charging = battery.charging;
+                        if (batteryValEl) {
+                            batteryValEl.innerText = `${Math.round(battery.level * 100)}% ${battery.charging ? '(CHG)' : ''}`;
+                        }
+                    };
+                    updateBattery();
+                    battery.addEventListener('levelchange', updateBattery);
+                    battery.addEventListener('chargingchange', updateBattery);
+                }).catch(err => console.warn("Battery API error:", err));
+            }
+        }
+
+        function sendBatteryData() {
+            if (!streaming) return;
+            const clientTsMs = getSyncedTimestampMs();
+            fetch('/battery', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Client-Timestamp-Ms': clientTsMs.toString()
+                },
+                body: JSON.stringify({ ...batteryData, clientTimestampMs: clientTsMs })
+            }).catch(err => console.warn("Battery send failed:", err));
+        }
+
+        function setupGPSSensor() {
+            if ('geolocation' in navigator) {
+                navigator.geolocation.watchPosition(
+                    (pos) => {
+                        gpsData.latitude = pos.coords.latitude;
+                        gpsData.longitude = pos.coords.longitude;
+                        gpsData.altitude = pos.coords.altitude || 0.0;
+                        gpsData.accuracy = pos.coords.accuracy || 0.0;
+
+                        if (gpsCoordValEl) {
+                            gpsCoordValEl.innerText = `${pos.coords.latitude.toFixed(4)} / ${pos.coords.longitude.toFixed(4)}`;
+                        }
+                        if (gpsAccValEl) {
+                            gpsAccValEl.innerText = `${pos.coords.accuracy.toFixed(1)} m`;
+                        }
+                    },
+                    (err) => console.warn("GPS Geolocation error:", err),
+                    { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+                );
+            }
+        }
+
+        function sendGPSData() {
+            if (!streaming) return;
+            const clientTsMs = getSyncedTimestampMs();
+            fetch('/gps', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Client-Timestamp-Ms': clientTsMs.toString()
+                },
+                body: JSON.stringify({ ...gpsData, clientTimestampMs: clientTsMs })
+            }).catch(err => console.warn("GPS send failed:", err));
+        }
 
         function parseFastDeviceInfo() {
             let model = "Unknown Device";
@@ -156,7 +260,7 @@
 
                 statusDiv.innerText = "READY";
             } catch (err) {
-                console.error("카메라 접근 오류: ", err);
+                console.error("Camera access error: ", err);
                 statusDiv.innerText = "CAMERA ERROR";
             }
         }
@@ -215,7 +319,7 @@
                         statusDiv.innerText = "IMU DENIED";
                     }
                 } catch (e) {
-                    console.error("IMU 권한 요청 실패:", e);
+                    console.error("Failed to request IMU permission:", e);
                 }
             } else {
                 setupIMUSensors();
@@ -253,7 +357,7 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(info)
-            }).catch(err => console.warn("디바이스 정보 전송 실패:", err));
+            }).catch(err => console.warn("Failed to send device info:", err));
         }
 
         function sendIMUData() {
@@ -273,7 +377,7 @@
                     'X-Client-Timestamp-Ms': clientTsMs.toString()
                 },
                 body: JSON.stringify(payload)
-            }).catch(err => console.warn("IMU 데이터 전송 실패:", err))
+            }).catch(err => console.warn("Failed to send IMU data:", err))
             .finally(() => {
                 isImuUploading = false;
             });
@@ -312,7 +416,7 @@
                             statusDiv.innerText = "ERROR";
                         }
                     } catch (err) {
-                        console.error("업로드 오류: ", err);
+                        console.error("Upload error: ", err);
                         statusDiv.innerText = "DISCONNECTED";
                     } finally {
                         isUploading = false;
@@ -323,16 +427,6 @@
             animationFrameId = requestAnimationFrame(sendFrameLoop);
         }
 
-        function stopRecordingBeacon() {
-            if (streaming) {
-                try {
-                    navigator.sendBeacon('/record/stop');
-                } catch (e) {
-                    fetch('/record/stop', { method: 'POST', keepalive: true }).catch(() => {});
-                }
-            }
-        }
-
         startBtn.addEventListener('click', () => {
             if (!streaming) {
                 streaming = true;
@@ -340,7 +434,14 @@
                 startBtn.classList.add('btn-stop');
                 animationFrameId = requestAnimationFrame(sendFrameLoop);
                 imuIntervalId = setInterval(sendIMUData, 30);
-                fetch('/record/start', { method: 'POST' }).catch(err => console.warn("녹화 시작 요청 실패:", err));
+
+                // Send immediate first packet for Battery and GPS
+                sendBatteryData();
+                sendGPSData();
+
+                batteryIntervalId = setInterval(sendBatteryData, 1000);
+                gpsIntervalId = setInterval(sendGPSData, 1000);
+                fetch('/record/start', { method: 'POST' }).catch(err => console.warn("Failed to request recording start:", err));
             } else {
                 streaming = false;
                 startBtn.innerText = "START STREAMING";
@@ -353,19 +454,26 @@
                     clearInterval(imuIntervalId);
                     imuIntervalId = null;
                 }
+                if (batteryIntervalId) {
+                    clearInterval(batteryIntervalId);
+                    batteryIntervalId = null;
+                }
+                if (gpsIntervalId) {
+                    clearInterval(gpsIntervalId);
+                    gpsIntervalId = null;
+                }
                 statusDiv.innerText = "STOPPED";
-                fetch('/record/stop', { method: 'POST' }).catch(err => console.warn("녹화 종료 요청 실패:", err));
+                fetch('/record/stop', { method: 'POST' }).catch(err => console.warn("Failed to request recording stop:", err));
             }
         });
 
         imuPermissionBtn.addEventListener('click', requestIMUPermission);
 
-        window.addEventListener('beforeunload', stopRecordingBeacon);
-        window.addEventListener('pagehide', stopRecordingBeacon);
-
         window.addEventListener('load', () => {
             initCamera();
             syncTimeWithServer();
+            setupBatterySensor();
+            setupGPSSensor();
             if (typeof DeviceMotionEvent === 'undefined' || typeof DeviceMotionEvent.requestPermission !== 'function') {
                 imuPermissionBtn.style.display = 'none';
                 setupIMUSensors();

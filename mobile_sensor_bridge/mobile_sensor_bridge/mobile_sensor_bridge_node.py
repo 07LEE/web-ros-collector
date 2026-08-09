@@ -19,6 +19,8 @@ from std_msgs.msg import String
 from ament_index_python.packages import get_package_share_directory
 from mobile_sensor_bridge.camera_bridge import CameraBridge
 from mobile_sensor_bridge.imu_bridge import ImuBridge
+from mobile_sensor_bridge.battery_bridge import BatteryBridge
+from mobile_sensor_bridge.gps_bridge import GpsBridge
 
 
 class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -42,6 +44,20 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(response_data)
+                return
+            except Exception:
+                self.send_response(500)
+                self.end_headers()
+                return
+
+        if self.path == '/record/stop':
+            try:
+                if self.node is not None:
+                    self.node.stop_bag_recording()
+                self.send_response(200)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(b"OK")
                 return
             except Exception:
                 self.send_response(500)
@@ -136,6 +152,46 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(500)
                 self.end_headers()
 
+        elif self.path == '/battery':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data.decode('utf-8'))
+
+                if self.node is not None:
+                    client_ts_str = self.headers.get('X-Client-Timestamp-Ms') or str(data.get('clientTimestampMs', ''))
+                    stamp = self.parse_stamp(client_ts_str)
+                    self.node.enqueue_battery(data, stamp)
+
+                self.send_response(200)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(b"OK")
+
+            except Exception:
+                self.send_response(500)
+                self.end_headers()
+
+        elif self.path == '/gps':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data.decode('utf-8'))
+
+                if self.node is not None:
+                    client_ts_str = self.headers.get('X-Client-Timestamp-Ms') or str(data.get('clientTimestampMs', ''))
+                    stamp = self.parse_stamp(client_ts_str)
+                    self.node.enqueue_gps(data, stamp)
+
+                self.send_response(200)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(b"OK")
+
+            except Exception:
+                self.send_response(500)
+                self.end_headers()
+
         elif self.path == '/upload':
             try:
                 content_length = int(self.headers['Content-Length'])
@@ -206,18 +262,26 @@ class MobileSensorBridgeNode(Node):
         self.declare_parameter('port', 8443)
         self.declare_parameter('image_topic', 'image_raw/compressed')
         self.declare_parameter('imu_topic', 'imu/data_raw')
+        self.declare_parameter('battery_topic', '/robot/battery')
+        self.declare_parameter('gps_topic', '/robot/gps')
         self.declare_parameter('frame_id_camera', 'phone_camera')
         self.declare_parameter('frame_id_imu', 'phone_imu')
+        self.declare_parameter('frame_id_gps', 'gps_link')
 
         self.server_port = self.get_parameter('port').get_parameter_value().integer_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         imu_topic = self.get_parameter('imu_topic').get_parameter_value().string_value
+        battery_topic = self.get_parameter('battery_topic').get_parameter_value().string_value
+        gps_topic = self.get_parameter('gps_topic').get_parameter_value().string_value
         frame_id_camera = self.get_parameter('frame_id_camera').get_parameter_value().string_value
         frame_id_imu = self.get_parameter('frame_id_imu').get_parameter_value().string_value
+        frame_id_gps = self.get_parameter('frame_id_gps').get_parameter_value().string_value
 
-        # Instantiate Camera and IMU Bridges
+        # Instantiate Camera, IMU, Battery, and GPS Bridges
         self.camera_bridge = CameraBridge(self, topic_name=image_topic, frame_id=frame_id_camera)
         self.imu_bridge = ImuBridge(self, topic_name=imu_topic, frame_id=frame_id_imu)
+        self.battery_bridge = BatteryBridge(self, topic_name=battery_topic, frame_id=frame_id_imu)
+        self.gps_bridge = GpsBridge(self, topic_name=gps_topic, frame_id=frame_id_gps)
 
         # Rosbag2 Automatic Recording Setup
         self.record_process = None
@@ -236,7 +300,6 @@ class MobileSensorBridgeNode(Node):
         # Thread-safe Publishing Queue & Spin Timers
         self.publish_queue = queue.Queue()
         self.create_timer(0.001, self._process_publish_queue)
-        self.create_timer(1.0, self._check_heartbeat_timeout)
 
         # Device Info Publisher
         self.device_info_publisher = self.create_publisher(
@@ -366,13 +429,21 @@ class MobileSensorBridgeNode(Node):
         self.last_data_received_time = time.time()
         self.publish_queue.put((self.imu_bridge.handle_imu, (data, stamp)))
 
+    def enqueue_battery(self, data: dict, stamp) -> None:
+        self.last_data_received_time = time.time()
+        self.publish_queue.put((self.battery_bridge.handle_battery, (data, stamp)))
+
+    def enqueue_gps(self, data: dict, stamp) -> None:
+        self.last_data_received_time = time.time()
+        self.publish_queue.put((self.gps_bridge.handle_gps, (data, stamp)))
+
     def enqueue_upload(self, post_data: bytes, content_type: str, stamp) -> None:
         self.last_data_received_time = time.time()
         self.publish_queue.put((self.camera_bridge.handle_upload, (post_data, content_type, stamp)))
 
     def _check_heartbeat_timeout(self) -> None:
         """Automatically stops rosbag2 recording if client stream disconnects or stops sending data for over 3 seconds."""
-        if self.record_process is not None:
+        if self.record_process is not None and self.last_data_received_time > 0.0:
             if time.time() - self.last_data_received_time > 3.0:
                 self.get_logger().info('No incoming sensor data for 3 seconds. Auto-closing rosbag2 recording...')
                 self.stop_bag_recording()
@@ -410,31 +481,41 @@ class MobileSensorBridgeNode(Node):
         """Starts automatic rosbag2 recording subprocess with QoS overrides for Best Effort sensor topics."""
         if self.record_process is not None:
             return
+        self.last_data_received_time = time.time()
         import datetime
         timestamp_str = datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
         output_path = os.path.join(self.bag_dir, f'rosbag2_{timestamp_str}')
 
         qos_override_file = os.path.join(self.bag_dir, 'qos_overrides.yaml')
-        if not os.path.exists(qos_override_file):
-            qos_content = (
-                "/image_raw/compressed:\n"
-                "  reliability: best_effort\n"
-                "  durability: volatile\n"
-                "  history: keep_last\n"
-                "  depth: 10\n"
-                "/imu/data_raw:\n"
-                "  reliability: best_effort\n"
-                "  durability: volatile\n"
-                "  history: keep_last\n"
-                "  depth: 10\n"
-                "/camera_info:\n"
-                "  reliability: best_effort\n"
-                "  durability: volatile\n"
-                "  history: keep_last\n"
-                "  depth: 10\n"
-            )
-            with open(qos_override_file, 'w') as f:
-                f.write(qos_content)
+        qos_content = (
+            "/image_raw/compressed:\n"
+            "  reliability: best_effort\n"
+            "  durability: volatile\n"
+            "  history: keep_last\n"
+            "  depth: 10\n"
+            "/imu/data_raw:\n"
+            "  reliability: best_effort\n"
+            "  durability: volatile\n"
+            "  history: keep_last\n"
+            "  depth: 10\n"
+            "/robot/battery:\n"
+            "  reliability: best_effort\n"
+            "  durability: volatile\n"
+            "  history: keep_last\n"
+            "  depth: 10\n"
+            "/robot/gps:\n"
+            "  reliability: best_effort\n"
+            "  durability: volatile\n"
+            "  history: keep_last\n"
+            "  depth: 10\n"
+            "/camera_info:\n"
+            "  reliability: best_effort\n"
+            "  durability: volatile\n"
+            "  history: keep_last\n"
+            "  depth: 10\n"
+        )
+        with open(qos_override_file, 'w') as f:
+            f.write(qos_content)
 
         cmd = [
             'ros2', 'bag', 'record',
@@ -443,28 +524,32 @@ class MobileSensorBridgeNode(Node):
             '--topics',
             'image_raw/compressed',
             'imu/data_raw',
+            '/robot/battery',
+            '/robot/gps',
             'mobile_sensor_bridge/device_info',
             'camera_info'
         ]
         try:
-            self.record_process = subprocess.Popen(cmd)
+            self.record_process = subprocess.Popen(cmd, preexec_fn=os.setsid)
             self.get_logger().info(f'Started automatic rosbag2 recording: {output_path}')
         except Exception as e:
             self.get_logger().error(f'Failed to start rosbag2 recording: {e}')
 
     def stop_bag_recording(self) -> None:
-        """Stops active rosbag2 recording process safely using SIGINT for DB flush."""
+        """Stops active rosbag2 recording process group safely using SIGINT for DB flush."""
         if self.record_process is None:
             return
         try:
             import signal
-            self.record_process.send_signal(signal.SIGINT)
+            pgid = os.getpgid(self.record_process.pid)
+            os.killpg(pgid, signal.SIGINT)
             self.record_process.wait(timeout=5)
             self.get_logger().info('Stopped automatic rosbag2 recording successfully.')
         except Exception as e:
             self.get_logger().warn(f'rosbag2 process cleanup warning: {e}')
             try:
-                self.record_process.kill()
+                import signal
+                os.killpg(os.getpgid(self.record_process.pid), signal.SIGKILL)
             except Exception:
                 pass
         finally:
