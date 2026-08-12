@@ -256,6 +256,16 @@
                     deviceInfo.frameRate = settings.frameRate;
 
                     sendDeviceInfoAsync(deviceInfo);
+
+                    if (typeof videoTrack.applyConstraints === 'function') {
+                        try {
+                            await videoTrack.applyConstraints({
+                                advanced: [{ focusMode: 'manual', exposureMode: 'manual', whiteBalanceMode: 'manual' }]
+                            });
+                        } catch (e) {
+                            console.warn("Manual AF/AE/AWB constraints not supported:", e);
+                        }
+                    }
                 }
 
                 statusDiv.innerText = "READY";
@@ -265,20 +275,33 @@
             }
         }
 
+        let imuBuffer = [];
+        let frameSeq = 0;
+        let imuBatchSeq = 0;
+
         function setupIMUSensors() {
             if (window.DeviceMotionEvent) {
                 window.addEventListener('devicemotion', (event) => {
-                    const acc = event.accelerationIncludingGravity || event.acceleration;
-                    if (acc) {
-                        imuData.accel.x = acc.x || 0;
-                        imuData.accel.y = acc.y || 0;
-                        imuData.accel.z = acc.z || 0;
-                    }
-                    if (event.rotationRate) {
-                        imuData.gyro.alpha = event.rotationRate.alpha || 0;
-                        imuData.gyro.beta = event.rotationRate.beta || 0;
-                        imuData.gyro.gamma = event.rotationRate.gamma || 0;
-                    }
+                    const eventTimeMs = (event.timeStamp || performance.now()) + performance.timeOrigin;
+                    const syncedTsMs = eventTimeMs + clockOffsetMs;
+                    const acc = event.accelerationIncludingGravity || event.acceleration || {};
+                    const rot = event.rotationRate || {};
+
+                    imuData.accel.x = acc.x || 0;
+                    imuData.accel.y = acc.y || 0;
+                    imuData.accel.z = acc.z || 0;
+
+                    imuData.gyro.alpha = rot.alpha || 0;
+                    imuData.gyro.beta = rot.beta || 0;
+                    imuData.gyro.gamma = rot.gamma || 0;
+
+                    const sample = {
+                        clientTimestampMs: syncedTsMs,
+                        accel: { ...imuData.accel },
+                        gyro: { ...imuData.gyro },
+                        orientation: { ...imuData.orientation }
+                    };
+                    imuBuffer.push(sample);
                     updateIMUDashboardUI();
                 });
             }
@@ -328,22 +351,34 @@
         }
 
         let clockOffsetMs = 0;
+        let syncIntervalId = null;
 
         async function syncTimeWithServer() {
-            try {
-                const t0 = performance.now() + performance.timeOrigin;
-                const res = await fetch('/sync_time');
-                const t1 = performance.now() + performance.timeOrigin;
-                if (res.ok) {
-                    const data = await res.json();
-                    const serverTimeMs = data.server_time_ns / 1e6;
-                    const rtt = t1 - t0;
-                    const estimatedServerTimeAtT1 = serverTimeMs + (rtt / 2);
-                    clockOffsetMs = estimatedServerTimeAtT1 - t1;
-                    console.log(`Time synced: RTT=${rtt.toFixed(2)}ms, clockOffset=${clockOffsetMs.toFixed(2)}ms`);
+            let bestRtt = Infinity;
+            let bestOffset = clockOffsetMs;
+
+            for (let i = 0; i < 5; i++) {
+                try {
+                    const t0 = performance.now() + performance.timeOrigin;
+                    const res = await fetch('/sync_time');
+                    const t1 = performance.now() + performance.timeOrigin;
+                    if (res.ok) {
+                        const data = await res.json();
+                        const serverTimeMs = data.server_time_ns / 1e6;
+                        const rtt = t1 - t0;
+                        if (rtt < bestRtt) {
+                            bestRtt = rtt;
+                            const estimatedServerTimeAtT1 = serverTimeMs + (rtt / 2);
+                            bestOffset = estimatedServerTimeAtT1 - t1;
+                        }
+                    }
+                } catch (e) {
+                    console.warn("Time sync probe failed:", e);
                 }
-            } catch (e) {
-                console.warn("Time sync failed:", e);
+            }
+            if (bestRtt !== Infinity) {
+                clockOffsetMs = bestOffset;
+                console.log(`Time synced: Min RTT=${bestRtt.toFixed(2)}ms, clockOffset=${clockOffsetMs.toFixed(2)}ms`);
             }
         }
 
@@ -361,33 +396,57 @@
         }
 
         function sendIMUData() {
-            if (!streaming || isImuUploading) return;
+            if (!streaming || isImuUploading || imuBuffer.length === 0) return;
             isImuUploading = true;
 
-            const clientTsMs = getSyncedTimestampMs();
-            const payload = {
-                ...imuData,
-                clientTimestampMs: clientTsMs
-            };
+            const batch = imuBuffer;
+            imuBuffer = [];
+            imuBatchSeq++;
 
+            const clientTsMs = getSyncedTimestampMs();
             fetch('/imu', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Client-Timestamp-Ms': clientTsMs.toString()
+                    'X-Client-Timestamp-Ms': clientTsMs.toString(),
+                    'X-Batch-Seq': imuBatchSeq.toString()
                 },
-                body: JSON.stringify(payload)
-            }).catch(err => console.warn("Failed to send IMU data:", err))
+                body: JSON.stringify(batch)
+            }).catch(err => console.warn("Failed to send IMU batch:", err))
             .finally(() => {
                 isImuUploading = false;
             });
         }
 
-        function sendFrameLoop() {
+        let wakeLock = null;
+
+        async function requestWakeLock() {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                }
+            } catch (err) {
+                console.warn("Wake lock failed:", err);
+            }
+        }
+
+        function releaseWakeLock() {
+            if (wakeLock !== null) {
+                wakeLock.release().then(() => { wakeLock = null; });
+            }
+        }
+
+        function sendFrameLoop(now, metadata) {
             if (!streaming) return;
+
+            let captureTsMs = getSyncedTimestampMs();
+            if (metadata && metadata.captureTime) {
+                captureTsMs = metadata.captureTime + clockOffsetMs;
+            }
 
             if (!isUploading && video.videoWidth > 0 && video.videoHeight > 0) {
                 isUploading = true;
+                frameSeq++;
 
                 canvas.width = video.videoWidth;
                 canvas.height = video.videoHeight;
@@ -399,13 +458,13 @@
                         return;
                     }
                     try {
-                        const clientTsMs = getSyncedTimestampMs();
                         const arrayBuffer = await blob.arrayBuffer();
                         const response = await fetch('/upload', {
                             method: 'POST',
                             headers: {
                                 'Content-Type': 'image/jpeg',
-                                'X-Client-Timestamp-Ms': clientTsMs.toString()
+                                'X-Client-Timestamp-Ms': captureTsMs.toString(),
+                                'X-Frame-Seq': frameSeq.toString()
                             },
                             body: arrayBuffer
                         });
@@ -424,7 +483,11 @@
                 }, 'image/jpeg', 0.85);
             }
 
-            animationFrameId = requestAnimationFrame(sendFrameLoop);
+            if ('requestVideoFrameCallback' in video) {
+                animationFrameId = video.requestVideoFrameCallback(sendFrameLoop);
+            } else {
+                animationFrameId = requestAnimationFrame(sendFrameLoop);
+            }
         }
 
         startBtn.addEventListener('click', () => {
@@ -432,22 +495,36 @@
                 streaming = true;
                 startBtn.innerText = "STOP STREAMING";
                 startBtn.classList.add('btn-stop');
-                animationFrameId = requestAnimationFrame(sendFrameLoop);
+
+                requestWakeLock();
+
+                if ('requestVideoFrameCallback' in video) {
+                    animationFrameId = video.requestVideoFrameCallback(sendFrameLoop);
+                } else {
+                    animationFrameId = requestAnimationFrame(sendFrameLoop);
+                }
                 imuIntervalId = setInterval(sendIMUData, 30);
 
-                // Send immediate first packet for Battery and GPS
                 sendBatteryData();
                 sendGPSData();
 
                 batteryIntervalId = setInterval(sendBatteryData, 1000);
                 gpsIntervalId = setInterval(sendGPSData, 1000);
+                syncIntervalId = setInterval(syncTimeWithServer, 30000);
                 fetch('/record/start', { method: 'POST' }).catch(err => console.warn("Failed to request recording start:", err));
             } else {
                 streaming = false;
                 startBtn.innerText = "START STREAMING";
                 startBtn.classList.remove('btn-stop');
+
+                releaseWakeLock();
+
                 if (animationFrameId) {
-                    cancelAnimationFrame(animationFrameId);
+                    if ('cancelVideoFrameCallback' in video) {
+                        video.cancelVideoFrameCallback(animationFrameId);
+                    } else {
+                        cancelAnimationFrame(animationFrameId);
+                    }
                     animationFrameId = null;
                 }
                 if (imuIntervalId) {
@@ -461,6 +538,10 @@
                 if (gpsIntervalId) {
                     clearInterval(gpsIntervalId);
                     gpsIntervalId = null;
+                }
+                if (syncIntervalId) {
+                    clearInterval(syncIntervalId);
+                    syncIntervalId = null;
                 }
                 statusDiv.innerText = "STOPPED";
                 fetch('/record/stop', { method: 'POST' }).catch(err => console.warn("Failed to request recording stop:", err));

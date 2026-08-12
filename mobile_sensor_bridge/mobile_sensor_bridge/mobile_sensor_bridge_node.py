@@ -68,7 +68,7 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         web_dir = os.path.dirname(self.html_filepath)
         target_path = os.path.abspath(os.path.join(web_dir, filename))
 
-        if not target_path.startswith(web_dir):
+        if os.path.commonpath([target_path, web_dir]) != web_dir:
             self.send_response(403)
             self.end_headers()
             return
@@ -260,13 +260,14 @@ class MobileSensorBridgeNode(Node):
 
         # Declare ROS 2 Parameters
         self.declare_parameter('port', 8443)
-        self.declare_parameter('image_topic', 'image_raw/compressed')
-        self.declare_parameter('imu_topic', 'imu/data_raw')
+        self.declare_parameter('image_topic', '/image_raw/compressed')
+        self.declare_parameter('imu_topic', '/imu/data_raw')
         self.declare_parameter('battery_topic', '/robot/battery')
         self.declare_parameter('gps_topic', '/robot/gps')
         self.declare_parameter('frame_id_camera', 'phone_camera')
         self.declare_parameter('frame_id_imu', 'phone_imu')
         self.declare_parameter('frame_id_gps', 'gps_link')
+        self.declare_parameter('bag_output_dir', '')
 
         self.server_port = self.get_parameter('port').get_parameter_value().integer_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
@@ -276,6 +277,7 @@ class MobileSensorBridgeNode(Node):
         frame_id_camera = self.get_parameter('frame_id_camera').get_parameter_value().string_value
         frame_id_imu = self.get_parameter('frame_id_imu').get_parameter_value().string_value
         frame_id_gps = self.get_parameter('frame_id_gps').get_parameter_value().string_value
+        custom_bag_dir = self.get_parameter('bag_output_dir').get_parameter_value().string_value
 
         # Instantiate Camera, IMU, Battery, and GPS Bridges
         self.camera_bridge = CameraBridge(self, topic_name=image_topic, frame_id=frame_id_camera)
@@ -286,20 +288,25 @@ class MobileSensorBridgeNode(Node):
         # Rosbag2 Automatic Recording Setup
         self.record_process = None
         self.last_data_received_time = 0.0
-        workspace_root = os.getcwd()
-        try:
-            share_dir = get_package_share_directory('mobile_sensor_bridge')
-            possible_root = os.path.abspath(os.path.join(share_dir, '..', '..', '..', '..'))
-            if os.path.exists(os.path.join(possible_root, 'src')) or os.path.exists(os.path.join(possible_root, 'install')):
-                workspace_root = possible_root
-        except Exception:
-            pass
-        self.bag_dir = os.path.join(workspace_root, 'data')
+
+        if custom_bag_dir:
+            self.bag_dir = os.path.abspath(custom_bag_dir)
+        else:
+            workspace_root = os.getcwd()
+            try:
+                share_dir = get_package_share_directory('mobile_sensor_bridge')
+                possible_root = os.path.abspath(os.path.join(share_dir, '..', '..', '..', '..'))
+                if os.path.exists(os.path.join(possible_root, 'src')) or os.path.exists(os.path.join(possible_root, 'install')):
+                    workspace_root = possible_root
+            except Exception:
+                pass
+            self.bag_dir = os.path.join(workspace_root, 'data')
         os.makedirs(self.bag_dir, exist_ok=True)
 
-        # Thread-safe Publishing Queue & Spin Timers
-        self.publish_queue = queue.Queue()
+        # Thread-safe Bounded Publishing Queue & Spin Timers
+        self.publish_queue = queue.Queue(maxsize=100)
         self.create_timer(0.001, self._process_publish_queue)
+        self.create_timer(1.0, self._check_heartbeat_timeout)
 
         # Device Info Publisher
         self.device_info_publisher = self.create_publisher(
@@ -318,6 +325,11 @@ class MobileSensorBridgeNode(Node):
         self.key_file = os.path.join(self.cert_dir, 'key.pem')
 
         self.generate_certificates()
+        if os.path.exists(self.key_file):
+            try:
+                os.chmod(self.key_file, 0o600)
+            except Exception:
+                pass
 
         # Web Assets Location Resolution
         try:
@@ -330,8 +342,6 @@ class MobileSensorBridgeNode(Node):
                 'web',
                 'index.html'
             )
-
-        self.server_port = 8443
 
         # Configure HTTP Request Handler
         MobileSensorHTTPRequestHandler.node = self
@@ -422,24 +432,32 @@ class MobileSensorBridgeNode(Node):
             else:
                 self.get_logger().info('Multi-IP Certificate generated successfully.')
 
+    def _push_to_queue(self, item) -> None:
+        if self.publish_queue.full():
+            try:
+                self.publish_queue.get_nowait()
+            except queue.Empty:
+                pass
+        self.publish_queue.put(item)
+
     def enqueue_device_info(self, data: dict) -> None:
-        self.publish_queue.put((self._publish_device_info, (data,)))
+        self._push_to_queue((self._publish_device_info, (data,)))
 
     def enqueue_imu(self, data: dict, stamp) -> None:
         self.last_data_received_time = time.time()
-        self.publish_queue.put((self.imu_bridge.handle_imu, (data, stamp)))
+        self._push_to_queue((self.imu_bridge.handle_imu, (data, stamp)))
 
     def enqueue_battery(self, data: dict, stamp) -> None:
         self.last_data_received_time = time.time()
-        self.publish_queue.put((self.battery_bridge.handle_battery, (data, stamp)))
+        self._push_to_queue((self.battery_bridge.handle_battery, (data, stamp)))
 
     def enqueue_gps(self, data: dict, stamp) -> None:
         self.last_data_received_time = time.time()
-        self.publish_queue.put((self.gps_bridge.handle_gps, (data, stamp)))
+        self._push_to_queue((self.gps_bridge.handle_gps, (data, stamp)))
 
     def enqueue_upload(self, post_data: bytes, content_type: str, stamp) -> None:
         self.last_data_received_time = time.time()
-        self.publish_queue.put((self.camera_bridge.handle_upload, (post_data, content_type, stamp)))
+        self._push_to_queue((self.camera_bridge.handle_upload, (post_data, content_type, stamp)))
 
     def _check_heartbeat_timeout(self) -> None:
         """Automatically stops rosbag2 recording if client stream disconnects or stops sending data for over 3 seconds."""
@@ -522,12 +540,12 @@ class MobileSensorBridgeNode(Node):
             '-o', output_path,
             '--qos-profile-overrides-path', qos_override_file,
             '--topics',
-            'image_raw/compressed',
-            'imu/data_raw',
+            '/image_raw/compressed',
+            '/imu/data_raw',
             '/robot/battery',
             '/robot/gps',
-            'mobile_sensor_bridge/device_info',
-            'camera_info'
+            '/mobile_sensor_bridge/device_info',
+            '/camera_info'
         ]
         try:
             self.record_process = subprocess.Popen(cmd, preexec_fn=os.setsid)
@@ -557,7 +575,11 @@ class MobileSensorBridgeNode(Node):
 
     def destroy_node(self) -> None:
         self.stop_bag_recording()
-        self.httpd.shutdown()
+        try:
+            self.httpd.server_close()
+            self.httpd.shutdown()
+        except Exception:
+            pass
         super().destroy_node()
 
 
