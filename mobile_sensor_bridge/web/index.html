@@ -23,6 +23,12 @@
                 <option value="1080p">1080p (1920x1080)</option>
                 <option value="4k">4K (3840x2160)</option>
             </select>
+            <select id="expSelect" class="btn btn-secondary" style="margin-right: 8px;">
+                <option value="auto">Exposure: Auto</option>
+                <option value="250">1/250s (bright)</option>
+                <option value="120" selected>1/120s (default)</option>
+                <option value="60">1/60s (indoor)</option>
+            </select>
             <button id="startBtn" class="btn">START STREAMING</button>
             <button id="imuPermissionBtn" class="btn btn-secondary">IMU PERMISSION</button>
         </div>
@@ -508,9 +514,14 @@
         }
 
         async function lockCameraConstraints() {
+            if (!streaming) return;       // guard: STOP pressed before lock fired
             if (!mediaStream) return;
             const videoTrack = mediaStream.getVideoTracks()[0];
             if (!videoTrack || typeof videoTrack.applyConstraints !== 'function') return;
+
+            // Wait 1.5s for AF to converge; first captured frame will already have fixed intrinsics
+            await new Promise(r => setTimeout(r, 1500));
+            if (!streaming) return;       // re-check after delay
 
             const caps = videoTrack.getCapabilities();
             const tryApply = async (c) => {
@@ -523,13 +534,32 @@
             if (caps.whiteBalanceMode?.includes('manual')) await tryApply({ whiteBalanceMode: 'manual' });
             if (caps.exposureMode?.includes('manual')) {
                 await tryApply({ exposureMode: 'manual' });
-                if (caps.exposureTime) {
+
+                const expSelect = document.getElementById('expSelect');
+                const expVal = expSelect ? expSelect.value : '120';
+
+                if (expVal !== 'auto' && caps.exposureTime) {
+                    const fps = parseInt(expVal, 10) || 120;
                     // W3C Image Capture spec: exposureTime unit is 100μs
-                    // 1/120s = 8333μs = 83.33 in 100μs units
-                    const target = Math.round(1e6 / 120 / 100); // = 83
+                    const target = Math.round(1e6 / fps / 100);
                     const clamped = Math.max(caps.exposureTime.min, Math.min(caps.exposureTime.max, target));
                     await tryApply({ exposureTime: clamped });
-                    console.log(`Exposure locked: ${clamped} (100μs units) range=[${caps.exposureTime.min}, ${caps.exposureTime.max}]`);
+                    console.log(`Exposure locked: 1/${fps}s → ${clamped} (100μs units) range=[${caps.exposureTime.min}, ${caps.exposureTime.max}]`);
+                } else if (expVal === 'auto') {
+                    // Adaptive: read current auto exposure, halve it (2 stops shorter)
+                    const autoSettings = videoTrack.getSettings();
+                    if (caps.exposureTime && autoSettings.exposureTime) {
+                        const adaptive = Math.max(caps.exposureTime.min, Math.round(autoSettings.exposureTime / 4));
+                        await tryApply({ exposureTime: adaptive });
+                        console.log(`Adaptive exposure: auto=${autoSettings.exposureTime} → clamped=${adaptive} (100μs units)`);
+                    }
+                }
+
+                // Boost ISO if supported to compensate for shorter exposure
+                if (caps.iso) {
+                    const targetIso = Math.min(caps.iso.max, Math.round(caps.iso.max * 0.5));
+                    await tryApply({ iso: targetIso });
+                    console.log(`ISO boosted: ${targetIso} (range=[${caps.iso.min}, ${caps.iso.max}])`);
                 }
             }
 
@@ -549,8 +579,8 @@
 
                 requestWakeLock();
 
-                // Lock AF/AE/AWB after 1.5s to allow auto-focus to converge first
-                setTimeout(lockCameraConstraints, 1500);
+                // Wait for AF to converge and lock camera constraints before first frame capture
+                await lockCameraConstraints();
 
                 if ('requestVideoFrameCallback' in video) {
                     animationFrameId = video.requestVideoFrameCallback(sendFrameLoop);
