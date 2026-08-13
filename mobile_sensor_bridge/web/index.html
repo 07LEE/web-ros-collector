@@ -18,6 +18,11 @@
         </div>
 
         <div class="controls">
+            <select id="resSelect" class="btn btn-secondary" style="margin-right: 8px;">
+                <option value="720p" selected>720p (1280x720)</option>
+                <option value="1080p">1080p (1920x1080)</option>
+                <option value="4k">4K (3840x2160)</option>
+            </select>
             <button id="startBtn" class="btn">START STREAMING</button>
             <button id="imuPermissionBtn" class="btn btn-secondary">IMU PERMISSION</button>
         </div>
@@ -230,19 +235,34 @@
             return { model, os, browser, rawUserAgent: ua };
         }
 
+        function getSelectedConstraints() {
+            const resSelect = document.getElementById('resSelect');
+            const val = resSelect ? resSelect.value : '720p';
+            let width = 1280, height = 720;
+            if (val === '1080p') {
+                width = 1920; height = 1080;
+            } else if (val === '4k') {
+                width = 3840; height = 2160;
+            }
+            return {
+                video: {
+                    facingMode: { ideal: 'environment' },
+                    width: { ideal: width },
+                    height: { ideal: height },
+                    frameRate: { ideal: 60 }
+                },
+                audio: false
+            };
+        }
+
         async function initCamera() {
             try {
                 const deviceInfo = parseFastDeviceInfo();
+                const constraints = getSelectedConstraints();
 
-                const constraints = {
-                    video: {
-                        facingMode: { ideal: 'environment' },
-                        width: { ideal: 4096 },
-                        height: { ideal: 2160 },
-                        frameRate: { ideal: 60 }
-                    },
-                    audio: false
-                };
+                if (mediaStream) {
+                    mediaStream.getTracks().forEach(t => t.stop());
+                }
 
                 mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
                 video.srcObject = mediaStream;
@@ -563,6 +583,15 @@
         });
 
         imuPermissionBtn.addEventListener('click', requestIMUPermission);
+
+        const resSelectEl = document.getElementById('resSelect');
+        if (resSelectEl) {
+            resSelectEl.addEventListener('change', () => {
+                if (!streaming) {
+                    initCamera();
+                }
+            });
+        }
 
         window.addEventListener('load', () => {
             initCamera();

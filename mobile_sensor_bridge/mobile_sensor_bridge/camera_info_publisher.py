@@ -66,6 +66,26 @@ def load_camera_info_from_yaml(yaml_url: str):
         return None, f"YAML parsing error: {e}"
 
 
+def parse_jpeg_size(data: bytes):
+    """Fast parsing of JPEG SOF0/SOF2 dimensions without decoding pixels."""
+    if not data or len(data) < 4 or data[:2] != b'\xff\xd8':
+        return None, None
+    i = 2
+    n = len(data)
+    while i < n - 9:
+        if data[i] != 0xff:
+            i += 1
+            continue
+        marker = data[i+1]
+        if marker in (0xc0, 0xc1, 0xc2, 0xc3):
+            h = (data[i+5] << 8) + data[i+6]
+            w = (data[i+7] << 8) + data[i+8]
+            return w, h
+        length = (data[i+2] << 8) + data[i+3]
+        i += 2 + length
+    return None, None
+
+
 class CameraInfoPublisherNode(Node):
     def __init__(self):
         super().__init__('camera_info_publisher')
@@ -135,26 +155,33 @@ class CameraInfoPublisherNode(Node):
         self.tf_broadcaster.sendTransform([tf_cam, tf_imu])
 
     def image_callback(self, msg: CompressedImage):
-        # Skip decoding and publishing if no subscribers exist for /image_raw and /camera_info
-        if self.pub_raw.get_subscription_count() == 0 and self.pub_info.get_subscription_count() == 0:
+        need_raw = self.pub_raw.get_subscription_count() > 0
+        need_info = self.base_camera_info is not None and self.pub_info.get_subscription_count() > 0
+
+        if not need_raw and not need_info:
             return
 
-        np_arr = np.frombuffer(msg.data, np.uint8)
-        cv_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        if cv_img is None:
-            return
+        w, h = None, None
 
-        h, w, _ = cv_img.shape
-        raw_msg = self.bridge.cv2_to_imgmsg(cv_img, encoding='bgr8')
-        raw_msg.header = msg.header
-        if not raw_msg.header.frame_id:
-            raw_msg.header.frame_id = self.frame_id_camera
-        self.pub_raw.publish(raw_msg)
+        if need_raw:
+            np_arr = np.frombuffer(msg.data, np.uint8)
+            cv_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if cv_img is None:
+                return
+            h, w, _ = cv_img.shape
+            raw_msg = self.bridge.cv2_to_imgmsg(cv_img, encoding='bgr8')
+            raw_msg.header = msg.header
+            if not raw_msg.header.frame_id:
+                raw_msg.header.frame_id = self.frame_id_camera
+            self.pub_raw.publish(raw_msg)
+        else:
+            w, h = parse_jpeg_size(msg.data)
 
-        # Publish /camera_info ONLY when valid calibration info exists
-        if self.base_camera_info is not None:
+        if need_info and w is not None and h is not None:
             info_msg = CameraInfo()
-            info_msg.header = raw_msg.header
+            info_msg.header = msg.header
+            if not info_msg.header.frame_id:
+                info_msg.header.frame_id = self.frame_id_camera
             info_msg.height = h
             info_msg.width = w
             info_msg.distortion_model = self.base_camera_info.distortion_model

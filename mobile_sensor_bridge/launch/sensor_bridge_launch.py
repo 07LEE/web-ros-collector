@@ -13,6 +13,7 @@ def generate_launch_description():
     camera_info_url_arg = DeclareLaunchArgument('camera_info_url', default_value='', description='Camera Calibration YAML URL')
     use_rviz_arg = DeclareLaunchArgument('use_rviz', default_value='false', description='Whether to start rviz2')
     bag_output_dir_arg = DeclareLaunchArgument('bag_output_dir', default_value='', description='Rosbag Output Directory')
+    heartbeat_timeout_arg = DeclareLaunchArgument('heartbeat_timeout', default_value='10.0', description='Heartbeat timeout in seconds for auto recording stop')
 
     return LaunchDescription([
         port_arg,
@@ -21,6 +22,7 @@ def generate_launch_description():
         camera_info_url_arg,
         use_rviz_arg,
         bag_output_dir_arg,
+        heartbeat_timeout_arg,
         Node(
             package='mobile_sensor_bridge',
             executable='mobile_sensor_bridge_node',
@@ -31,6 +33,7 @@ def generate_launch_description():
                 'image_topic': LaunchConfiguration('image_topic'),
                 'imu_topic': LaunchConfiguration('imu_topic'),
                 'bag_output_dir': LaunchConfiguration('bag_output_dir'),
+                'heartbeat_timeout': LaunchConfiguration('heartbeat_timeout'),
             }]
         ),
         Node(
