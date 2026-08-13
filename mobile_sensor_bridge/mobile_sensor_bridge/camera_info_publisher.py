@@ -135,6 +135,10 @@ class CameraInfoPublisherNode(Node):
         self.tf_broadcaster.sendTransform([tf_cam, tf_imu])
 
     def image_callback(self, msg: CompressedImage):
+        # Skip decoding and publishing if no subscribers exist for /image_raw and /camera_info
+        if self.pub_raw.get_subscription_count() == 0 and self.pub_info.get_subscription_count() == 0:
+            return
+
         np_arr = np.frombuffer(msg.data, np.uint8)
         cv_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         if cv_img is None:

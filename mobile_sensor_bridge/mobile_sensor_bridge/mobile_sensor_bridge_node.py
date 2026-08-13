@@ -257,6 +257,7 @@ class MobileSensorBridgeNode(Node):
         self.declare_parameter('frame_id_imu', 'phone_imu')
         self.declare_parameter('frame_id_gps', 'gps_link')
         self.declare_parameter('bag_output_dir', '')
+        self.declare_parameter('heartbeat_timeout', 10.0)
 
         self.server_port = self.get_parameter('port').get_parameter_value().integer_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
@@ -267,6 +268,7 @@ class MobileSensorBridgeNode(Node):
         frame_id_imu = self.get_parameter('frame_id_imu').get_parameter_value().string_value
         frame_id_gps = self.get_parameter('frame_id_gps').get_parameter_value().string_value
         custom_bag_dir = self.get_parameter('bag_output_dir').get_parameter_value().string_value
+        self.heartbeat_timeout = self.get_parameter('heartbeat_timeout').get_parameter_value().double_value
 
         # Instantiate Camera, IMU, Battery, and GPS Bridges
         self.camera_bridge = CameraBridge(self, topic_name=image_topic, frame_id=frame_id_camera)
@@ -292,9 +294,10 @@ class MobileSensorBridgeNode(Node):
             self.bag_dir = os.path.join(workspace_root, 'data')
         os.makedirs(self.bag_dir, exist_ok=True)
 
-        # Thread-safe Bounded Publishing Queue & Spin Timers
-        self.publish_queue = queue.Queue(maxsize=100)
-        self.create_timer(0.001, self._process_publish_queue)
+        # Separate Thread-safe Bounded Publishing Queues for Camera & Sensors
+        self.camera_publish_queue = queue.Queue(maxsize=10)
+        self.sensor_publish_queue = queue.Queue(maxsize=500)
+        self.create_timer(0.001, self._process_publish_queues)
         self.create_timer(1.0, self._check_heartbeat_timeout)
 
         # Device Info Publisher
@@ -438,38 +441,42 @@ class MobileSensorBridgeNode(Node):
             else:
                 self.get_logger().info('Multi-IP Certificate generated successfully.')
 
-    def _push_to_queue(self, item) -> None:
-        if self.publish_queue.full():
+    def _push_to_queue(self, target_queue: queue.Queue, item) -> None:
+        """Atomically pushes item to bounded queue without ever blocking HTTP handler thread."""
+        while True:
             try:
-                self.publish_queue.get_nowait()
-            except queue.Empty:
-                pass
-        self.publish_queue.put(item)
+                target_queue.put_nowait(item)
+                return
+            except queue.Full:
+                try:
+                    target_queue.get_nowait()
+                except queue.Empty:
+                    pass
 
     def enqueue_device_info(self, data: dict) -> None:
-        self._push_to_queue((self._publish_device_info, (data,)))
+        self._push_to_queue(self.sensor_publish_queue, (self._publish_device_info, (data,)))
 
     def enqueue_imu(self, data: dict, stamp) -> None:
         self.last_data_received_time = time.time()
-        self._push_to_queue((self.imu_bridge.handle_imu, (data, stamp)))
+        self._push_to_queue(self.sensor_publish_queue, (self.imu_bridge.handle_imu, (data, stamp)))
 
     def enqueue_battery(self, data: dict, stamp) -> None:
         self.last_data_received_time = time.time()
-        self._push_to_queue((self.battery_bridge.handle_battery, (data, stamp)))
+        self._push_to_queue(self.sensor_publish_queue, (self.battery_bridge.handle_battery, (data, stamp)))
 
     def enqueue_gps(self, data: dict, stamp) -> None:
         self.last_data_received_time = time.time()
-        self._push_to_queue((self.gps_bridge.handle_gps, (data, stamp)))
+        self._push_to_queue(self.sensor_publish_queue, (self.gps_bridge.handle_gps, (data, stamp)))
 
     def enqueue_upload(self, post_data: bytes, content_type: str, stamp) -> None:
         self.last_data_received_time = time.time()
-        self._push_to_queue((self.camera_bridge.handle_upload, (post_data, content_type, stamp)))
+        self._push_to_queue(self.camera_publish_queue, (self.camera_bridge.handle_upload, (post_data, content_type, stamp)))
 
     def _check_heartbeat_timeout(self) -> None:
-        """Automatically stops rosbag2 recording if client stream disconnects or stops sending data for over 3 seconds."""
+        """Automatically stops rosbag2 recording if client stream disconnects or stops sending data."""
         if self.record_process is not None and self.last_data_received_time > 0.0:
-            if time.time() - self.last_data_received_time > 3.0:
-                self.get_logger().info('No incoming sensor data for 3 seconds. Auto-closing rosbag2 recording...')
+            if time.time() - self.last_data_received_time > self.heartbeat_timeout:
+                self.get_logger().info(f'No incoming sensor data for {self.heartbeat_timeout} seconds. Auto-closing rosbag2 recording...')
                 self.stop_bag_recording()
 
     def _publish_device_info(self, data: dict) -> None:
@@ -491,15 +498,26 @@ class MobileSensorBridgeNode(Node):
             info_msg.data = json.dumps(data)
             self.device_info_publisher.publish(info_msg)
 
-    def _process_publish_queue(self) -> None:
-        while not self.publish_queue.empty():
+    def _process_publish_queues(self) -> None:
+        # Process Sensor Queue
+        while not self.sensor_publish_queue.empty():
             try:
-                func, args = self.publish_queue.get_nowait()
+                func, args = self.sensor_publish_queue.get_nowait()
                 func(*args)
             except queue.Empty:
                 break
             except Exception as e:
-                self.get_logger().error(f"Error processing publish queue: {e}")
+                self.get_logger().error(f"Error processing sensor publish queue: {e}")
+
+        # Process Camera Queue
+        while not self.camera_publish_queue.empty():
+            try:
+                func, args = self.camera_publish_queue.get_nowait()
+                func(*args)
+            except queue.Empty:
+                break
+            except Exception as e:
+                self.get_logger().error(f"Error processing camera publish queue: {e}")
 
     def start_bag_recording(self) -> None:
         """Starts automatic rosbag2 recording subprocess with QoS overrides for Best Effort sensor topics."""

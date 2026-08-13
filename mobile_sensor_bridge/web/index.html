@@ -237,8 +237,8 @@
                 const constraints = {
                     video: {
                         facingMode: { ideal: 'environment' },
-                        width: { ideal: 3840, max: 4096 },
-                        height: { ideal: 2160, max: 2160 },
+                        width: { ideal: 4096 },
+                        height: { ideal: 2160 },
                         frameRate: { ideal: 60 }
                     },
                     audio: false
@@ -246,13 +246,18 @@
 
                 mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
                 video.srcObject = mediaStream;
+                try {
+                    await video.play();
+                } catch (e) {
+                    console.warn("video.play initial trigger warning:", e);
+                }
 
                 const videoTrack = mediaStream.getVideoTracks()[0];
                 if (videoTrack) {
                     const settings = videoTrack.getSettings();
                     deviceInfo.cameraLabel = videoTrack.label || "Default Camera";
-                    deviceInfo.width = settings.width;
-                    deviceInfo.height = settings.height;
+                    deviceInfo.width = settings.width || video.videoWidth;
+                    deviceInfo.height = settings.height || video.videoHeight;
                     deviceInfo.frameRate = settings.frameRate;
 
                     sendDeviceInfoAsync(deviceInfo);
@@ -494,8 +499,13 @@
             }
         }
 
-        startBtn.addEventListener('click', () => {
+        startBtn.addEventListener('click', async () => {
             if (!streaming) {
+                try {
+                    await video.play();
+                } catch (e) {
+                    console.warn("video.play on click warning:", e);
+                }
                 streaming = true;
                 startBtn.innerText = "STOP STREAMING";
                 startBtn.classList.add('btn-stop');
