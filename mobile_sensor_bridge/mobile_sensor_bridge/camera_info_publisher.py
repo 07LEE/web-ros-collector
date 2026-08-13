@@ -11,14 +11,18 @@ from cv_bridge import CvBridge
 import numpy as np
 
 
-def load_camera_info_from_yaml(yaml_url: str) -> CameraInfo:
-    """Parses ROS camera calibration YAML file into sensor_msgs.msg.CameraInfo."""
+def load_camera_info_from_yaml(yaml_url: str):
+    """Parses ROS camera calibration YAML file into sensor_msgs.msg.CameraInfo.
+
+    Returns:
+        tuple: (CameraInfo object or None, error_message or None)
+    """
     if not yaml_url:
-        return None
+        return None, "Empty camera_info_url provided."
 
     clean_path = yaml_url.replace('file://', '')
     if not os.path.exists(clean_path):
-        return None
+        return None, f"Calibration file not found at: {clean_path}"
 
     try:
         with open(clean_path, 'r') as f:
@@ -35,20 +39,29 @@ def load_camera_info_from_yaml(yaml_url: str) -> CameraInfo:
 
         cam_mat = calib_data.get('camera_matrix', {})
         if isinstance(cam_mat, dict):
-            ci.k = [float(x) for x in cam_mat.get('data', [])]
+            data = [float(x) for x in cam_mat.get('data', [])]
+            if len(data) != 9:
+                return None, f"camera_matrix data length is {len(data)}, expected 9."
+            ci.k = data
 
         rect_mat = calib_data.get('rectification_matrix', {})
         if isinstance(rect_mat, dict):
-            ci.r = [float(x) for x in rect_mat.get('data', [])]
+            data = [float(x) for x in rect_mat.get('data', [])]
+            if len(data) == 9:
+                ci.r = data
+            elif len(data) == 0:
+                ci.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 
         proj_mat = calib_data.get('projection_matrix', {})
         if isinstance(proj_mat, dict):
-            ci.p = [float(x) for x in proj_mat.get('data', [])]
+            data = [float(x) for x in proj_mat.get('data', [])]
+            if len(data) != 12:
+                return None, f"projection_matrix data length is {len(data)}, expected 12."
+            ci.p = data
 
-        return ci
+        return ci, None
     except Exception as e:
-        print(f"Failed to parse camera calibration YAML ({yaml_url}): {e}")
-        return None
+        return None, f"YAML parsing error: {e}"
 
 
 class CameraInfoPublisherNode(Node):
@@ -66,11 +79,14 @@ class CameraInfoPublisherNode(Node):
 
         self.base_camera_info = None
         if self.camera_info_url:
-            self.base_camera_info = load_camera_info_from_yaml(self.camera_info_url)
+            self.base_camera_info, err = load_camera_info_from_yaml(self.camera_info_url)
             if self.base_camera_info is not None:
                 self.get_logger().info(f"Loaded camera calibration from: {self.camera_info_url}")
             else:
-                self.get_logger().warn(f"Failed to load camera calibration from URL: {self.camera_info_url}")
+                self.get_logger().warn(f"Failed to load camera calibration from URL ({self.camera_info_url}): {err}")
+                self.get_logger().warn("/camera_info topic will NOT be published.")
+        else:
+            self.get_logger().info("No camera_info_url provided. /camera_info topic will NOT be published.")
 
         self.sub_compressed = self.create_subscription(
             CompressedImage,
@@ -124,6 +140,7 @@ class CameraInfoPublisherNode(Node):
             raw_msg.header.frame_id = self.frame_id_camera
         self.pub_raw.publish(raw_msg)
 
+        # Publish /camera_info ONLY when valid calibration info exists
         if self.base_camera_info is not None:
             info_msg = CameraInfo()
             info_msg.header = raw_msg.header
@@ -131,15 +148,34 @@ class CameraInfoPublisherNode(Node):
             info_msg.width = w
             info_msg.distortion_model = self.base_camera_info.distortion_model
             info_msg.d = self.base_camera_info.d
-            info_msg.k = self.base_camera_info.k
             info_msg.r = self.base_camera_info.r
-            info_msg.p = self.base_camera_info.p
-            self.pub_info.publish(info_msg)
-        else:
-            info_msg = CameraInfo()
-            info_msg.header = raw_msg.header
-            info_msg.height = h
-            info_msg.width = w
+
+            bw = float(self.base_camera_info.width)
+            bh = float(self.base_camera_info.height)
+
+            if bw > 0.0 and bh > 0.0 and (w != int(bw) or h != int(bh)):
+                sx = float(w) / bw
+                sy = float(h) / bh
+
+                # Scale K matrix (fx, cx, fy, cy)
+                k = list(self.base_camera_info.k)
+                info_msg.k = [
+                    k[0] * sx, 0.0,        k[2] * sx,
+                    0.0,       k[4] * sy, k[5] * sy,
+                    0.0,       0.0,        1.0
+                ]
+
+                # Scale P matrix (fx, cx, Tx, fy, cy, Ty)
+                p = list(self.base_camera_info.p)
+                info_msg.p = [
+                    p[0] * sx, 0.0,       p[2] * sx, p[3] * sx,
+                    0.0,       p[5] * sy, p[6] * sy, p[7] * sy,
+                    0.0,       0.0,       1.0,       0.0
+                ]
+            else:
+                info_msg.k = self.base_camera_info.k
+                info_msg.p = self.base_camera_info.p
+
             self.pub_info.publish(info_msg)
 
 
