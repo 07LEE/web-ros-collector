@@ -36,6 +36,8 @@ def load_camera_info_from_yaml(yaml_url: str):
         dist_coeff = calib_data.get('distortion_coefficients', {})
         if isinstance(dist_coeff, dict):
             ci.d = [float(x) for x in dist_coeff.get('data', [])]
+        if not ci.d:
+            ci.d = [0.0] * 5
 
         cam_mat = calib_data.get('camera_matrix', {})
         if isinstance(cam_mat, dict):
@@ -78,6 +80,11 @@ class CameraInfoPublisherNode(Node):
         self.camera_info_url = self.get_parameter('camera_info_url').get_parameter_value().string_value
 
         self.base_camera_info = None
+        self._cached_resolution = None
+        self._cached_k = None
+        self._cached_p = None
+        self._warned_aspect_mismatch = False
+
         if self.camera_info_url:
             self.base_camera_info, err = load_camera_info_from_yaml(self.camera_info_url)
             if self.base_camera_info is not None:
@@ -150,31 +157,45 @@ class CameraInfoPublisherNode(Node):
             info_msg.d = self.base_camera_info.d
             info_msg.r = self.base_camera_info.r
 
-            bw = float(self.base_camera_info.width)
-            bh = float(self.base_camera_info.height)
+            if (w, h) != self._cached_resolution:
+                self._cached_resolution = (w, h)
+                bw = float(self.base_camera_info.width)
+                bh = float(self.base_camera_info.height)
 
-            if bw > 0.0 and bh > 0.0 and (w != int(bw) or h != int(bh)):
-                sx = float(w) / bw
-                sy = float(h) / bh
+                if bw > 0.0 and bh > 0.0 and (w != int(bw) or h != int(bh)):
+                    sx = float(w) / bw
+                    sy = float(h) / bh
 
-                # Scale K matrix (fx, cx, fy, cy)
-                k = list(self.base_camera_info.k)
-                info_msg.k = [
-                    k[0] * sx, 0.0,        k[2] * sx,
-                    0.0,       k[4] * sy, k[5] * sy,
-                    0.0,       0.0,        1.0
-                ]
+                    # Scale K matrix (fx, cx, fy, cy)
+                    k = list(self.base_camera_info.k)
+                    self._cached_k = [
+                        k[0] * sx, 0.0,        k[2] * sx,
+                        0.0,       k[4] * sy, k[5] * sy,
+                        0.0,       0.0,        1.0
+                    ]
 
-                # Scale P matrix (fx, cx, Tx, fy, cy, Ty)
-                p = list(self.base_camera_info.p)
-                info_msg.p = [
-                    p[0] * sx, 0.0,       p[2] * sx, p[3] * sx,
-                    0.0,       p[5] * sy, p[6] * sy, p[7] * sy,
-                    0.0,       0.0,       1.0,       0.0
-                ]
-            else:
-                info_msg.k = self.base_camera_info.k
-                info_msg.p = self.base_camera_info.p
+                    # Scale P matrix (fx, cx, Tx, fy, cy, Ty)
+                    p = list(self.base_camera_info.p)
+                    self._cached_p = [
+                        p[0] * sx, 0.0,       p[2] * sx, p[3] * sx,
+                        0.0,       p[5] * sy, p[6] * sy, p[7] * sy,
+                        0.0,       0.0,       1.0,       0.0
+                    ]
+
+                    calib_aspect = bw / bh
+                    stream_aspect = float(w) / float(h)
+                    if abs(calib_aspect - stream_aspect) > 1e-3 and not self._warned_aspect_mismatch:
+                        self.get_logger().warn(
+                            f"Aspect ratio mismatch: calib {int(bw)}x{int(bh)} ({calib_aspect:.3f}) vs "
+                            f"stream {w}x{h} ({stream_aspect:.3f}). Intrinsics scaling assumes pure resize and may be inaccurate if cropped."
+                        )
+                        self._warned_aspect_mismatch = True
+                else:
+                    self._cached_k = self.base_camera_info.k
+                    self._cached_p = self.base_camera_info.p
+
+            info_msg.k = self._cached_k
+            info_msg.p = self._cached_p
 
             self.pub_info.publish(info_msg)
 
