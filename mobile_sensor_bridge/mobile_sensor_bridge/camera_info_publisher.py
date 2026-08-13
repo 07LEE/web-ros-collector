@@ -1,3 +1,5 @@
+import os
+import yaml
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -7,10 +9,46 @@ from geometry_msgs.msg import TransformStamped
 import cv2
 from cv_bridge import CvBridge
 import numpy as np
-try:
-    from camera_info_manager import CameraInfoManager
-except ImportError:
-    CameraInfoManager = None
+
+
+def load_camera_info_from_yaml(yaml_url: str) -> CameraInfo:
+    """Parses ROS camera calibration YAML file into sensor_msgs.msg.CameraInfo."""
+    if not yaml_url:
+        return None
+
+    clean_path = yaml_url.replace('file://', '')
+    if not os.path.exists(clean_path):
+        return None
+
+    try:
+        with open(clean_path, 'r') as f:
+            calib_data = yaml.safe_load(f)
+
+        ci = CameraInfo()
+        ci.width = int(calib_data.get('image_width', 0))
+        ci.height = int(calib_data.get('image_height', 0))
+        ci.distortion_model = str(calib_data.get('distortion_model', 'plumb_bob'))
+
+        dist_coeff = calib_data.get('distortion_coefficients', {})
+        if isinstance(dist_coeff, dict):
+            ci.d = [float(x) for x in dist_coeff.get('data', [])]
+
+        cam_mat = calib_data.get('camera_matrix', {})
+        if isinstance(cam_mat, dict):
+            ci.k = [float(x) for x in cam_mat.get('data', [])]
+
+        rect_mat = calib_data.get('rectification_matrix', {})
+        if isinstance(rect_mat, dict):
+            ci.r = [float(x) for x in rect_mat.get('data', [])]
+
+        proj_mat = calib_data.get('projection_matrix', {})
+        if isinstance(proj_mat, dict):
+            ci.p = [float(x) for x in proj_mat.get('data', [])]
+
+        return ci
+    except Exception as e:
+        print(f"Failed to parse camera calibration YAML ({yaml_url}): {e}")
+        return None
 
 
 class CameraInfoPublisherNode(Node):
@@ -26,14 +64,13 @@ class CameraInfoPublisherNode(Node):
         self.frame_id_imu = self.get_parameter('frame_id_imu').get_parameter_value().string_value
         self.camera_info_url = self.get_parameter('camera_info_url').get_parameter_value().string_value
 
-        self.cinfo_manager = None
-        if self.camera_info_url and CameraInfoManager is not None:
-            self.cinfo_manager = CameraInfoManager(self, cname='phone_camera', url=self.camera_info_url)
-            self.cinfo_manager.loadCameraInfo()
-            if self.cinfo_manager.isCalibrated():
+        self.base_camera_info = None
+        if self.camera_info_url:
+            self.base_camera_info = load_camera_info_from_yaml(self.camera_info_url)
+            if self.base_camera_info is not None:
                 self.get_logger().info(f"Loaded camera calibration from: {self.camera_info_url}")
             else:
-                self.get_logger().warn(f"Failed to calibrate camera using URL: {self.camera_info_url}")
+                self.get_logger().warn(f"Failed to load camera calibration from URL: {self.camera_info_url}")
 
         self.sub_compressed = self.create_subscription(
             CompressedImage,
@@ -87,8 +124,19 @@ class CameraInfoPublisherNode(Node):
             raw_msg.header.frame_id = self.frame_id_camera
         self.pub_raw.publish(raw_msg)
 
-        if self.cinfo_manager and self.cinfo_manager.isCalibrated():
-            info_msg = self.cinfo_manager.getCameraInfo()
+        if self.base_camera_info is not None:
+            info_msg = CameraInfo()
+            info_msg.header = raw_msg.header
+            info_msg.height = h
+            info_msg.width = w
+            info_msg.distortion_model = self.base_camera_info.distortion_model
+            info_msg.d = self.base_camera_info.d
+            info_msg.k = self.base_camera_info.k
+            info_msg.r = self.base_camera_info.r
+            info_msg.p = self.base_camera_info.p
+            self.pub_info.publish(info_msg)
+        else:
+            info_msg = CameraInfo()
             info_msg.header = raw_msg.header
             info_msg.height = h
             info_msg.width = w

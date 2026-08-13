@@ -40,10 +40,17 @@ class ImuBridge:
         sY = math.sin(_y / 2.0)
 
         # W3C Intrinsic Z-X'-Y''
-        w = cZ * cX * cY - sZ * sX * sY
-        x = cZ * sX * cY - sZ * cX * sY
-        y = cZ * cX * sY + sZ * sX * cY
-        z = sZ * cX * cY + cZ * sX * sY
+        w_w3c = cZ * cX * cY - sZ * sX * sY
+        x_w3c = cZ * sX * cY - sZ * cX * sY
+        y_w3c = cZ * cX * sY + sZ * sX * cY
+        z_w3c = sZ * cX * cY + cZ * sX * sY
+
+        # Post-multiply by q_z(+90 deg) = (w=sqrt(0.5), x=0, y=0, z=sqrt(0.5)) to align with ROS REP-103
+        inv_sqrt2 = 0.7071067811865475
+        w = inv_sqrt2 * (w_w3c - z_w3c)
+        x = inv_sqrt2 * (x_w3c + y_w3c)
+        y = inv_sqrt2 * (y_w3c - x_w3c)
+        z = inv_sqrt2 * (z_w3c + w_w3c)
 
         q = Quaternion()
         q.x = float(x)

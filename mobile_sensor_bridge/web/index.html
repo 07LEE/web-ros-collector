@@ -295,6 +295,10 @@
                     imuData.gyro.beta = rot.beta || 0;
                     imuData.gyro.gamma = rot.gamma || 0;
 
+                    updateIMUDashboardUI();
+
+                    if (!streaming) return;
+
                     const sample = {
                         clientTimestampMs: syncedTsMs,
                         accel: { ...imuData.accel },
@@ -302,7 +306,7 @@
                         orientation: { ...imuData.orientation }
                     };
                     imuBuffer.push(sample);
-                    updateIMUDashboardUI();
+                    if (imuBuffer.length > 500) imuBuffer.shift();
                 });
             }
 
