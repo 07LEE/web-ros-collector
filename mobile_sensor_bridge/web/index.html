@@ -118,7 +118,8 @@
 
         let mediaStream = null;
         let streaming = false;
-        let isUploading = false;
+        let inFlight = 0;
+        const MAX_IN_FLIGHT = 3;
         let isImuUploading = false;
         let animationFrameId = null;
         let imuIntervalId = null;
@@ -284,11 +285,18 @@
 
                     if (typeof videoTrack.applyConstraints === 'function') {
                         try {
-                            await videoTrack.applyConstraints({
-                                advanced: [{ focusMode: 'manual', exposureMode: 'manual', whiteBalanceMode: 'manual' }]
-                            });
+                            const caps = videoTrack.getCapabilities();
+                            const advanced = [{ focusMode: 'manual', exposureMode: 'manual', whiteBalanceMode: 'manual' }];
+                            if (caps && caps.exposureTime) {
+                                // Target 1/120s (8333μs), clamped to device min/max
+                                const targetUs = Math.round(1 / 120 * 1e6);
+                                const clampedUs = Math.max(caps.exposureTime.min, Math.min(caps.exposureTime.max, targetUs));
+                                advanced[0].exposureTime = clampedUs;
+                                console.log(`Exposure time set: ${clampedUs}μs (range: ${caps.exposureTime.min}~${caps.exposureTime.max})`);
+                            }
+                            await videoTrack.applyConstraints({ advanced });
                         } catch (e) {
-                            console.warn("Manual AF/AE/AWB constraints not supported:", e);
+                            console.warn("Manual AF/AE/AWB/Exposure constraints not supported:", e);
                         }
                     }
                 }
@@ -473,42 +481,39 @@
                 captureTsMs = metadata.captureTime + performance.timeOrigin + clockOffsetMs;
             }
 
-            if (!isUploading && video.videoWidth > 0 && video.videoHeight > 0) {
-                isUploading = true;
+            if (inFlight < MAX_IN_FLIGHT && video.videoWidth > 0 && video.videoHeight > 0) {
+                inFlight++;
                 frameSeq++;
+                const currentSeq = frameSeq;
 
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
+                // Only reallocate canvas backing store when resolution actually changes
+                if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                }
                 context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-                canvas.toBlob(async (blob) => {
+                canvas.toBlob((blob) => {
                     if (!blob) {
-                        isUploading = false;
+                        inFlight--;
                         return;
                     }
-                    try {
-                        const arrayBuffer = await blob.arrayBuffer();
-                        const response = await fetch('/upload', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'image/jpeg',
-                                'X-Client-Timestamp-Ms': captureTsMs.toString(),
-                                'X-Frame-Seq': frameSeq.toString()
-                            },
-                            body: arrayBuffer
-                        });
-
-                        if (response.ok) {
-                            statusDiv.innerText = "STREAMING";
-                        } else {
-                            statusDiv.innerText = "ERROR";
-                        }
-                    } catch (err) {
+                    fetch('/upload', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'image/jpeg',
+                            'X-Client-Timestamp-Ms': captureTsMs.toString(),
+                            'X-Frame-Seq': currentSeq.toString()
+                        },
+                        body: blob
+                    }).then(response => {
+                        statusDiv.innerText = response.ok ? "STREAMING" : "ERROR";
+                    }).catch(err => {
                         console.error("Upload error: ", err);
                         statusDiv.innerText = "DISCONNECTED";
-                    } finally {
-                        isUploading = false;
-                    }
+                    }).finally(() => {
+                        inFlight--;
+                    });
                 }, 'image/jpeg', 0.85);
             }
 
