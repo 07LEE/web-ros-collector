@@ -81,8 +81,8 @@ class ImuBridge:
         raw_gb = float(gyro.get('beta', 0.0))   # rate around X
         raw_gg = float(gyro.get('gamma', 0.0))  # rate around Y
 
-        imu_msg.angular_velocity.x = math.radians(raw_gb)
-        imu_msg.angular_velocity.y = -math.radians(raw_gg)
+        imu_msg.angular_velocity.x = math.radians(raw_gg)
+        imu_msg.angular_velocity.y = -math.radians(raw_gb)
         imu_msg.angular_velocity.z = math.radians(raw_ga)
 
         # Orientation (W3C intrinsic Z-X'-Y'' in deg)

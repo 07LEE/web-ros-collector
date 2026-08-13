@@ -98,20 +98,9 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def parse_stamp(self, client_ts_ms_str: str):
         """Parses client timestamp in milliseconds or falls back to node clock."""
-        if client_ts_ms_str and self.node is not None:
-            try:
-                client_ts_ms = float(client_ts_ms_str)
-                client_ts_ns = int(client_ts_ms * 1e6)
-                sec = client_ts_ns // 1_000_000_000
-                nanosec = client_ts_ns % 1_000_000_000
-                from builtin_interfaces.msg import Time
-                stamp = Time()
-                stamp.sec = sec
-                stamp.nanosec = nanosec
-                return stamp
-            except Exception:
-                pass
-        return self.node.get_clock().now().to_msg() if self.node else None
+        if self.node is not None:
+            return self.node.parse_stamp(client_ts_ms_str)
+        return None
 
     def do_POST(self):
         """Handles HTTP POST requests and routes payloads to CameraBridge or ImuBridge."""
@@ -395,6 +384,23 @@ class MobileSensorBridgeNode(Node):
             ips = ['127.0.0.1']
 
         return ips
+
+    def parse_stamp(self, client_ts_ms_str: str):
+        """Parses client timestamp in milliseconds string to builtin_interfaces.msg.Time."""
+        if client_ts_ms_str:
+            try:
+                client_ts_ms = float(client_ts_ms_str)
+                client_ts_ns = int(client_ts_ms * 1e6)
+                sec = client_ts_ns // 1_000_000_000
+                nanosec = client_ts_ns % 1_000_000_000
+                from builtin_interfaces.msg import Time
+                stamp = Time()
+                stamp.sec = sec
+                stamp.nanosec = nanosec
+                return stamp
+            except Exception:
+                pass
+        return self.get_clock().now().to_msg()
 
     def generate_certificates(self) -> None:
         needs_regen = not os.path.exists(self.cert_file) or not os.path.exists(self.key_file)

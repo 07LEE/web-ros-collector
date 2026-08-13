@@ -441,7 +441,7 @@
 
             let captureTsMs = getSyncedTimestampMs();
             if (metadata && metadata.captureTime) {
-                captureTsMs = metadata.captureTime + clockOffsetMs;
+                captureTsMs = metadata.captureTime + performance.timeOrigin + clockOffsetMs;
             }
 
             if (!isUploading && video.videoWidth > 0 && video.videoHeight > 0) {
