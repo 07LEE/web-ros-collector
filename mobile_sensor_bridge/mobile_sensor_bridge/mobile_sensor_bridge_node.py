@@ -190,9 +190,10 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 if self.node is not None:
                     client_ts_str = self.headers.get('X-Client-Timestamp-Ms')
                     stamp = self.parse_stamp(client_ts_str)
+                    frame_seq = self.headers.get('X-Frame-Seq')
                     exposure_time = self.headers.get('X-Exposure-Time')
                     iso = self.headers.get('X-ISO')
-                    self.node.enqueue_upload(post_data, content_type, stamp, exposure_time, iso)
+                    self.node.enqueue_upload(post_data, content_type, stamp, exposure_time, iso, frame_seq)
 
                 self._send_response_ok(b"OK")
 
@@ -465,11 +466,11 @@ class MobileSensorBridgeNode(Node):
         self._push_to_queue(self.sensor_publish_queue, (self.gps_bridge.handle_gps, (data, stamp)))
 
     def enqueue_upload(self, post_data: bytes, content_type: str, stamp,
-                       exposure_time: str = None, iso: str = None) -> None:
+                       exposure_time: str = None, iso: str = None, frame_seq: str = None) -> None:
         self.last_data_received_time = time.time()
         self._push_to_queue(
             self.camera_publish_queue,
-            (self.camera_bridge.handle_upload, (post_data, content_type, stamp, exposure_time, iso))
+            (self.camera_bridge.handle_upload, (post_data, content_type, stamp, exposure_time, iso, frame_seq))
         )
 
     def _check_heartbeat_timeout(self) -> None:

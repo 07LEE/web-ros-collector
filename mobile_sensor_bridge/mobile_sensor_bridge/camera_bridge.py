@@ -32,7 +32,7 @@ class CameraBridge:
         )
 
     def handle_upload(self, post_data: bytes, content_type: str, stamp,
-                      exposure_time: str = None, iso: str = None) -> None:
+                      exposure_time: str = None, iso: str = None, frame_seq: str = None) -> None:
         """Processes compressed image payload received over HTTP and publishes to ROS2 topics.
 
         Publishes the raw compressed image to the image topic and, if exposure
@@ -45,6 +45,7 @@ class CameraBridge:
             stamp (builtin_interfaces.msg.Time): ROS2 time stamp.
             exposure_time (str): Exposure time value in 100us units (W3C spec), or None.
             iso (str): ISO sensitivity value, or None.
+            frame_seq (str): Client frame sequence number, or None.
         """
         img_format = 'png' if 'png' in content_type else 'jpeg'
         comp_msg = CompressedImage()
@@ -54,10 +55,11 @@ class CameraBridge:
         comp_msg.data = post_data
         self.compressed_publisher.publish(comp_msg)
 
-        if exposure_time is not None or iso is not None:
+        if exposure_time is not None or iso is not None or frame_seq is not None:
             meta = {
                 'stamp_sec': stamp.sec,
                 'stamp_nanosec': stamp.nanosec,
+                'frame_seq': int(frame_seq) if frame_seq else None,
                 'exposure_time_100us': int(exposure_time) if exposure_time else None,
                 'exposure_time_us': int(exposure_time) * 100 if exposure_time else None,
                 'iso': int(iso) if iso else None,
@@ -65,3 +67,4 @@ class CameraBridge:
             meta_msg = String()
             meta_msg.data = json.dumps(meta)
             self.exposure_publisher.publish(meta_msg)
+
