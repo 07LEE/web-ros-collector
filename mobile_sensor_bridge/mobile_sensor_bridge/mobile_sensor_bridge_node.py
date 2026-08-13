@@ -516,34 +516,27 @@ class MobileSensorBridgeNode(Node):
         timestamp_str = datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
         output_path = os.path.join(self.bag_dir, f'rosbag2_{timestamp_str}')
 
-        qos_override_file = os.path.join(self.bag_dir, 'qos_overrides.yaml')
-        qos_content = (
-            "/image_raw/compressed:\n"
-            "  reliability: best_effort\n"
-            "  durability: volatile\n"
-            "  history: keep_last\n"
-            "  depth: 10\n"
-            "/imu/data_raw:\n"
-            "  reliability: best_effort\n"
-            "  durability: volatile\n"
-            "  history: keep_last\n"
-            "  depth: 10\n"
-            "/robot/battery:\n"
-            "  reliability: best_effort\n"
-            "  durability: volatile\n"
-            "  history: keep_last\n"
-            "  depth: 10\n"
-            "/robot/gps:\n"
-            "  reliability: best_effort\n"
-            "  durability: volatile\n"
-            "  history: keep_last\n"
-            "  depth: 10\n"
-            "/camera_info:\n"
+        # Single source of truth: topics that need best_effort QoS override
+        # Add new best_effort topics here only; device_info uses default reliable and is appended separately
+        best_effort_topics = [
+            '/image_raw/compressed',
+            '/imu/data_raw',
+            '/robot/battery',
+            '/robot/gps',
+            '/camera_info',
+            '/camera/exposure_metadata',
+        ]
+        reliable_topics = [
+            '/mobile_sensor_bridge/device_info',
+        ]
+
+        qos_entry = (
             "  reliability: best_effort\n"
             "  durability: volatile\n"
             "  history: keep_last\n"
             "  depth: 10\n"
         )
+        qos_content = ''.join(f"{t}:\n{qos_entry}" for t in best_effort_topics)
         with open(qos_override_file, 'w') as f:
             f.write(qos_content)
 
@@ -552,13 +545,8 @@ class MobileSensorBridgeNode(Node):
             '-o', output_path,
             '--qos-profile-overrides-path', qos_override_file,
             '--topics',
-            '/image_raw/compressed',
-            '/imu/data_raw',
-            '/robot/battery',
-            '/robot/gps',
-            '/mobile_sensor_bridge/device_info',
-            '/camera_info',
-            '/camera/exposure_metadata'
+            *best_effort_topics,
+            *reliable_topics,
         ]
         try:
             self.record_process = subprocess.Popen(cmd, preexec_fn=os.setsid)

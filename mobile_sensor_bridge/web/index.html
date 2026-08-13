@@ -573,7 +573,11 @@
                 }
             }
 
-            console.log('Camera settings after lock:', JSON.stringify(videoTrack.getSettings()));
+            // Use getSettings() as the source of truth — device may silently ignore tryApply()
+            const finalSettings = videoTrack.getSettings();
+            lockedExposureTime = finalSettings.exposureTime ?? null;
+            lockedIso = finalSettings.iso ?? null;
+            console.log('Camera settings after lock:', JSON.stringify(finalSettings));
         }
 
         startBtn.addEventListener('click', async () => {
@@ -610,6 +614,10 @@
                 streaming = false;
                 startBtn.innerText = "START STREAMING";
                 startBtn.classList.remove('btn-stop');
+
+                // Reset locked camera state so stale values are not reused in next session
+                lockedExposureTime = null;
+                lockedIso = null;
 
                 releaseWakeLock();
 
@@ -648,6 +656,8 @@
         if (resSelectEl) {
             resSelectEl.addEventListener('change', () => {
                 if (!streaming) {
+                    lockedExposureTime = null;
+                    lockedIso = null;
                     initCamera();
                 }
             });
