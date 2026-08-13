@@ -131,6 +131,8 @@
         let imuIntervalId = null;
         let batteryIntervalId = null;
         let gpsIntervalId = null;
+        let lockedExposureTime = null;  // in 100us units (W3C spec), set after lockCameraConstraints
+        let lockedIso = null;
 
         const imuData = {
             accel: { x: 0, y: 0, z: 0 },
@@ -492,7 +494,9 @@
                         headers: {
                             'Content-Type': 'image/jpeg',
                             'X-Client-Timestamp-Ms': captureTsMs.toString(),
-                            'X-Frame-Seq': currentSeq.toString()
+                            'X-Frame-Seq': currentSeq.toString(),
+                            ...(lockedExposureTime !== null && { 'X-Exposure-Time': lockedExposureTime.toString() }),
+                            ...(lockedIso !== null && { 'X-ISO': lockedIso.toString() })
                         },
                         body: blob
                     }).then(response => {
@@ -557,12 +561,14 @@
                     await tryApply({ exposureTime: appliedExp });
                     console.log(`Adaptive exposure (-2EV): auto=${autoExp} → ${appliedExp} (100μs units)`);
                 }
+                lockedExposureTime = appliedExp;  // store for per-frame headers
 
                 // EV-preserving ISO: boost proportionally to compensate for shorter exposure
                 if (caps.iso && autoIso && autoExp && appliedExp && appliedExp !== autoExp) {
                     const newIso = Math.round(autoIso * (autoExp / appliedExp));
                     const clampedIso = Math.max(caps.iso.min, Math.min(caps.iso.max, newIso));
                     await tryApply({ iso: clampedIso });
+                    lockedIso = clampedIso;  // store for per-frame headers
                     console.log(`ISO (EV-compensated): ${autoIso} → ${clampedIso} (range=[${caps.iso.min}, ${caps.iso.max}])`);
                 }
             }

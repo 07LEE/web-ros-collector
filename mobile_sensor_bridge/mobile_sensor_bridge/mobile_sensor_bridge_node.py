@@ -184,7 +184,9 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 if self.node is not None:
                     client_ts_str = self.headers.get('X-Client-Timestamp-Ms')
                     stamp = self.parse_stamp(client_ts_str)
-                    self.node.enqueue_upload(post_data, content_type, stamp)
+                    exposure_time = self.headers.get('X-Exposure-Time')
+                    iso = self.headers.get('X-ISO')
+                    self.node.enqueue_upload(post_data, content_type, stamp, exposure_time, iso)
 
                 self._send_response_ok(b"OK")
 
@@ -450,9 +452,13 @@ class MobileSensorBridgeNode(Node):
         self.last_data_received_time = time.time()
         self._push_to_queue(self.sensor_publish_queue, (self.gps_bridge.handle_gps, (data, stamp)))
 
-    def enqueue_upload(self, post_data: bytes, content_type: str, stamp) -> None:
+    def enqueue_upload(self, post_data: bytes, content_type: str, stamp,
+                       exposure_time: str = None, iso: str = None) -> None:
         self.last_data_received_time = time.time()
-        self._push_to_queue(self.camera_publish_queue, (self.camera_bridge.handle_upload, (post_data, content_type, stamp)))
+        self._push_to_queue(
+            self.camera_publish_queue,
+            (self.camera_bridge.handle_upload, (post_data, content_type, stamp, exposure_time, iso))
+        )
 
     def _check_heartbeat_timeout(self) -> None:
         """Automatically stops rosbag2 recording if client stream disconnects or stops sending data."""
@@ -551,7 +557,8 @@ class MobileSensorBridgeNode(Node):
             '/robot/battery',
             '/robot/gps',
             '/mobile_sensor_bridge/device_info',
-            '/camera_info'
+            '/camera_info',
+            '/camera/exposure_metadata'
         ]
         try:
             self.record_process = subprocess.Popen(cmd, preexec_fn=os.setsid)
