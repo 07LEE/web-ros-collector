@@ -116,7 +116,9 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     self.node.enqueue_device_info(data)
 
                 self._send_response_ok(b"OK")
-            except Exception:
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /device_info: {e}")
                 self._send_error_response(500)
 
         elif self.path == '/imu':
@@ -156,7 +158,9 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
                 self._send_response_ok(b"OK")
 
-            except Exception:
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /battery: {e}")
                 self._send_error_response(500)
 
         elif self.path == '/gps':
@@ -172,7 +176,9 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
                 self._send_response_ok(b"OK")
 
-            except Exception:
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /gps: {e}")
                 self._send_error_response(500)
 
         elif self.path == '/upload':
@@ -190,7 +196,9 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
                 self._send_response_ok(b"OK")
 
-            except Exception:
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /upload: {e}")
                 self._send_error_response(500)
 
         elif self.path == '/record/start':
@@ -198,7 +206,9 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 if self.node is not None:
                     self.node.start_bag_recording()
                 self._send_response_ok(b"OK")
-            except Exception:
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /record/start: {e}")
                 self._send_error_response(500)
 
         elif self.path == '/record/stop':
@@ -206,7 +216,9 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 if self.node is not None:
                     self.node.stop_bag_recording()
                 self._send_response_ok(b"OK")
-            except Exception:
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /record/stop: {e}")
                 self._send_error_response(500)
 
 
@@ -537,6 +549,7 @@ class MobileSensorBridgeNode(Node):
             "  depth: 10\n"
         )
         qos_content = ''.join(f"{t}:\n{qos_entry}" for t in best_effort_topics)
+        qos_override_file = os.path.join(self.bag_dir, 'qos_overrides.yaml')
         with open(qos_override_file, 'w') as f:
             f.write(qos_content)
 
