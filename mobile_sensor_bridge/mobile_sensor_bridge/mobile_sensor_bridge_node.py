@@ -28,10 +28,28 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
     node = None
     html_filepath = ""
+    protocol_version = 'HTTP/1.1'
 
     def log_message(self, format, *args):
         """Suppresses default HTTP request logging to prevent terminal output spam."""
         pass
+
+    def _send_response_ok(self, body=b"OK", content_type='text/plain'):
+        self.send_response(200)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Connection', 'keep-alive')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_error_response(self, code=500, message=b""):
+        self.send_response(code)
+        self.send_header('Content-Length', str(len(message)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        if message:
+            self.wfile.write(message)
 
     def do_GET(self):
         """Handles HTTP GET requests to serve static web assets or perform time sync."""
@@ -39,29 +57,20 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             try:
                 current_time_ns = self.node.get_clock().now().nanoseconds if self.node else 0
                 response_data = json.dumps({'server_time_ns': current_time_ns}).encode('utf-8')
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(response_data)
+                self._send_response_ok(response_data, 'application/json')
                 return
             except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_error_response(500)
                 return
 
         if self.path == '/record/stop':
             try:
                 if self.node is not None:
                     self.node.stop_bag_recording()
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
                 return
             except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_error_response(500)
                 return
 
         filename = 'index.html' if self.path in ('/', '/index.html') else self.path.lstrip('/')
@@ -69,8 +78,7 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         target_path = os.path.abspath(os.path.join(web_dir, filename))
 
         if os.path.commonpath([target_path, web_dir]) != web_dir:
-            self.send_response(403)
-            self.end_headers()
+            self._send_error_response(403)
             return
 
         if os.path.exists(target_path) and os.path.isfile(target_path):
@@ -84,17 +92,11 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 elif filename.endswith('.js'):
                     content_type = 'application/javascript; charset=utf-8'
 
-                self.send_response(200)
-                self.send_header('Content-Type', content_type)
-                self.end_headers()
-                self.wfile.write(content)
+                self._send_response_ok(content, content_type)
             except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(str(e).encode('utf-8'))
+                self._send_error_response(500, str(e).encode('utf-8'))
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._send_error_response(404)
 
     def parse_stamp(self, client_ts_ms_str: str):
         """Parses client timestamp in milliseconds or falls back to node clock."""
@@ -113,13 +115,9 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 if self.node is not None:
                     self.node.enqueue_device_info(data)
 
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
             except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_error_response(500)
 
         elif self.path == '/imu':
             try:
@@ -128,18 +126,22 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(post_data.decode('utf-8'))
 
                 if self.node is not None:
-                    client_ts_str = self.headers.get('X-Client-Timestamp-Ms') or str(data.get('clientTimestampMs', ''))
+                    client_ts_str = self.headers.get('X-Client-Timestamp-Ms')
+                    if not client_ts_str:
+                        if isinstance(data, list) and len(data) > 0:
+                            client_ts_str = str(data[0].get('clientTimestampMs', ''))
+                        elif isinstance(data, dict):
+                            client_ts_str = str(data.get('clientTimestampMs', ''))
+
                     stamp = self.parse_stamp(client_ts_str)
                     self.node.enqueue_imu(data, stamp)
 
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
 
-            except Exception:
-                self.send_response(500)
-                self.end_headers()
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /imu request: {e}")
+                self._send_error_response(500)
 
         elif self.path == '/battery':
             try:
@@ -152,14 +154,10 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     stamp = self.parse_stamp(client_ts_str)
                     self.node.enqueue_battery(data, stamp)
 
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
 
             except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_error_response(500)
 
         elif self.path == '/gps':
             try:
@@ -172,14 +170,10 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     stamp = self.parse_stamp(client_ts_str)
                     self.node.enqueue_gps(data, stamp)
 
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
 
             except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_error_response(500)
 
         elif self.path == '/upload':
             try:
@@ -192,44 +186,32 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     stamp = self.parse_stamp(client_ts_str)
                     self.node.enqueue_upload(post_data, content_type, stamp)
 
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.send_header('Connection', 'keep-alive')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
 
             except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_error_response(500)
 
         elif self.path == '/record/start':
             try:
                 if self.node is not None:
                     self.node.start_bag_recording()
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
             except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_error_response(500)
 
         elif self.path == '/record/stop':
             try:
                 if self.node is not None:
                     self.node.stop_bag_recording()
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
             except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_error_response(500)
 
 
 class SecureHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """Multi-threaded HTTPS server wrapping client sockets individually per connection."""
     allow_reuse_address = True
+    daemon_threads = True
 
     def __init__(self, server_address, request_handler_class, ssl_context):
         super().__init__(server_address, request_handler_class)
