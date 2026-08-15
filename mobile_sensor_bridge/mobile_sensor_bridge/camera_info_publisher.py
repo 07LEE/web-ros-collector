@@ -111,9 +111,9 @@ class CameraInfoPublisherNode(Node):
                 self.get_logger().info(f"Loaded camera calibration from: {self.camera_info_url}")
             else:
                 self.get_logger().warn(f"Failed to load camera calibration from URL ({self.camera_info_url}): {err}")
-                self.get_logger().warn("/camera_info topic will NOT be published.")
-        else:
-            self.get_logger().info("No camera_info_url provided. /camera_info topic will NOT be published.")
+
+        if self.base_camera_info is None:
+            self.get_logger().info("Using dynamic approximate camera intrinsics (FOV ~75°, f ≈ W * 0.65) for /camera_info.")
 
         self.sub_compressed = self.create_subscription(
             CompressedImage,
@@ -156,7 +156,7 @@ class CameraInfoPublisherNode(Node):
 
     def image_callback(self, msg: CompressedImage):
         need_raw = self.pub_raw.get_subscription_count() > 0
-        need_info = self.base_camera_info is not None and self.pub_info.get_subscription_count() > 0
+        need_info = self.pub_info.get_subscription_count() > 0 or self.base_camera_info is None
 
         if not need_raw and not need_info:
             return
@@ -177,7 +177,21 @@ class CameraInfoPublisherNode(Node):
         else:
             w, h = parse_jpeg_size(msg.data)
 
-        if need_info and w is not None and h is not None:
+        if self.base_camera_info is None and w is not None and h is not None:
+            ci = CameraInfo()
+            ci.width = w
+            ci.height = h
+            ci.distortion_model = 'plumb_bob'
+            ci.d = [0.0, 0.0, 0.0, 0.0, 0.0]
+            f = float(w) * 0.65
+            cx = float(w) / 2.0
+            cy = float(h) / 2.0
+            ci.k = [f, 0.0, cx, 0.0, f, cy, 0.0, 0.0, 1.0]
+            ci.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+            ci.p = [f, 0.0, cx, 0.0, 0.0, f, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
+            self.base_camera_info = ci
+
+        if need_info and w is not None and h is not None and self.base_camera_info is not None:
             info_msg = CameraInfo()
             info_msg.header = msg.header
             if not info_msg.header.frame_id:
