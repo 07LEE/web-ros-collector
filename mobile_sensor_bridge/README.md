@@ -67,6 +67,7 @@ colcon build --packages-select mobile_sensor_bridge
 | /robot/battery | sensor_msgs/msg/BatteryState | Best Effort | Smartphone battery percentage and charging status |
 | /robot/gps | sensor_msgs/msg/NavSatFix | Best Effort | Geolocation latitude, longitude, altitude, and covariance |
 | mobile_sensor_bridge/device_info | std_msgs/msg/String | Reliable | Connected mobile device metadata (JSON string) |
+| /camera/exposure_metadata | std_msgs/msg/String | Best Effort | Per-frame camera exposure time, ISO, and sequence metadata (JSON) |
 | image_raw | sensor_msgs/msg/Image | Best Effort | Decompressed raw image (published by camera_info_publisher) |
 | camera_info | sensor_msgs/msg/CameraInfo | Best Effort | Camera intrinsic parameters (published by camera_info_publisher) |
 

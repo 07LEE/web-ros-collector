@@ -80,6 +80,7 @@ Mobile Sensor Bridge is a ROS 2 Jazzy package that transforms any modern smartph
 | /robot/battery | sensor_msgs/msg/BatteryState | Best Effort | Battery percentage and charging status |
 | /robot/gps | sensor_msgs/msg/NavSatFix | Best Effort | Latitude, longitude, altitude, and covariance |
 | mobile_sensor_bridge/device_info | std_msgs/msg/String | Reliable | Connected smartphone metadata (JSON) |
+| /camera/exposure_metadata | std_msgs/msg/String | Best Effort | Per-frame camera exposure time, ISO, and sequence metadata (JSON) |
 
 ## 5. Hardware Validation & Verification
 
