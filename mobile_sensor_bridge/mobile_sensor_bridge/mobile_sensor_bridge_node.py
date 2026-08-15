@@ -28,10 +28,28 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
     node = None
     html_filepath = ""
+    protocol_version = 'HTTP/1.1'
 
     def log_message(self, format, *args):
         """Suppresses default HTTP request logging to prevent terminal output spam."""
         pass
+
+    def _send_response_ok(self, body=b"OK", content_type='text/plain'):
+        self.send_response(200)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Connection', 'keep-alive')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_error_response(self, code=500, message=b""):
+        self.send_response(code)
+        self.send_header('Content-Length', str(len(message)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        if message:
+            self.wfile.write(message)
 
     def do_GET(self):
         """Handles HTTP GET requests to serve static web assets or perform time sync."""
@@ -39,38 +57,28 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             try:
                 current_time_ns = self.node.get_clock().now().nanoseconds if self.node else 0
                 response_data = json.dumps({'server_time_ns': current_time_ns}).encode('utf-8')
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(response_data)
+                self._send_response_ok(response_data, 'application/json')
                 return
             except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_error_response(500)
                 return
 
         if self.path == '/record/stop':
             try:
                 if self.node is not None:
                     self.node.stop_bag_recording()
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
                 return
             except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_error_response(500)
                 return
 
         filename = 'index.html' if self.path in ('/', '/index.html') else self.path.lstrip('/')
         web_dir = os.path.dirname(self.html_filepath)
         target_path = os.path.abspath(os.path.join(web_dir, filename))
 
-        if not target_path.startswith(web_dir):
-            self.send_response(403)
-            self.end_headers()
+        if os.path.commonpath([target_path, web_dir]) != web_dir:
+            self._send_error_response(403)
             return
 
         if os.path.exists(target_path) and os.path.isfile(target_path):
@@ -84,34 +92,17 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 elif filename.endswith('.js'):
                     content_type = 'application/javascript; charset=utf-8'
 
-                self.send_response(200)
-                self.send_header('Content-Type', content_type)
-                self.end_headers()
-                self.wfile.write(content)
+                self._send_response_ok(content, content_type)
             except Exception as e:
-                self.send_response(500)
-                self.end_headers()
-                self.wfile.write(str(e).encode('utf-8'))
+                self._send_error_response(500, str(e).encode('utf-8'))
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._send_error_response(404)
 
     def parse_stamp(self, client_ts_ms_str: str):
         """Parses client timestamp in milliseconds or falls back to node clock."""
-        if client_ts_ms_str and self.node is not None:
-            try:
-                client_ts_ms = float(client_ts_ms_str)
-                client_ts_ns = int(client_ts_ms * 1e6)
-                sec = client_ts_ns // 1_000_000_000
-                nanosec = client_ts_ns % 1_000_000_000
-                from builtin_interfaces.msg import Time
-                stamp = Time()
-                stamp.sec = sec
-                stamp.nanosec = nanosec
-                return stamp
-            except Exception:
-                pass
-        return self.node.get_clock().now().to_msg() if self.node else None
+        if self.node is not None:
+            return self.node.parse_stamp(client_ts_ms_str)
+        return None
 
     def do_POST(self):
         """Handles HTTP POST requests and routes payloads to CameraBridge or ImuBridge."""
@@ -124,13 +115,11 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 if self.node is not None:
                     self.node.enqueue_device_info(data)
 
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
-            except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_response_ok(b"OK")
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /device_info: {e}")
+                self._send_error_response(500)
 
         elif self.path == '/imu':
             try:
@@ -139,18 +128,22 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(post_data.decode('utf-8'))
 
                 if self.node is not None:
-                    client_ts_str = self.headers.get('X-Client-Timestamp-Ms') or str(data.get('clientTimestampMs', ''))
+                    client_ts_str = self.headers.get('X-Client-Timestamp-Ms')
+                    if not client_ts_str:
+                        if isinstance(data, list) and len(data) > 0:
+                            client_ts_str = str(data[0].get('clientTimestampMs', ''))
+                        elif isinstance(data, dict):
+                            client_ts_str = str(data.get('clientTimestampMs', ''))
+
                     stamp = self.parse_stamp(client_ts_str)
                     self.node.enqueue_imu(data, stamp)
 
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
 
-            except Exception:
-                self.send_response(500)
-                self.end_headers()
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /imu request: {e}")
+                self._send_error_response(500)
 
         elif self.path == '/battery':
             try:
@@ -163,14 +156,12 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     stamp = self.parse_stamp(client_ts_str)
                     self.node.enqueue_battery(data, stamp)
 
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
 
-            except Exception:
-                self.send_response(500)
-                self.end_headers()
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /battery: {e}")
+                self._send_error_response(500)
 
         elif self.path == '/gps':
             try:
@@ -183,14 +174,12 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     stamp = self.parse_stamp(client_ts_str)
                     self.node.enqueue_gps(data, stamp)
 
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
 
-            except Exception:
-                self.send_response(500)
-                self.end_headers()
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /gps: {e}")
+                self._send_error_response(500)
 
         elif self.path == '/upload':
             try:
@@ -201,46 +190,43 @@ class MobileSensorHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                 if self.node is not None:
                     client_ts_str = self.headers.get('X-Client-Timestamp-Ms')
                     stamp = self.parse_stamp(client_ts_str)
-                    self.node.enqueue_upload(post_data, content_type, stamp)
+                    frame_seq = self.headers.get('X-Frame-Seq')
+                    exposure_time = self.headers.get('X-Exposure-Time')
+                    iso = self.headers.get('X-ISO')
+                    self.node.enqueue_upload(post_data, content_type, stamp, exposure_time, iso, frame_seq)
 
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.send_header('Connection', 'keep-alive')
-                self.end_headers()
-                self.wfile.write(b"OK")
+                self._send_response_ok(b"OK")
 
-            except Exception:
-                self.send_response(500)
-                self.end_headers()
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /upload: {e}")
+                self._send_error_response(500)
 
         elif self.path == '/record/start':
             try:
                 if self.node is not None:
                     self.node.start_bag_recording()
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
-            except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_response_ok(b"OK")
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /record/start: {e}")
+                self._send_error_response(500)
 
         elif self.path == '/record/stop':
             try:
                 if self.node is not None:
                     self.node.stop_bag_recording()
-                self.send_response(200)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(b"OK")
-            except Exception:
-                self.send_response(500)
-                self.end_headers()
+                self._send_response_ok(b"OK")
+            except Exception as e:
+                if self.node is not None:
+                    self.node.get_logger().error(f"Error handling /record/stop: {e}")
+                self._send_error_response(500)
 
 
 class SecureHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """Multi-threaded HTTPS server wrapping client sockets individually per connection."""
     allow_reuse_address = True
+    daemon_threads = True
 
     def __init__(self, server_address, request_handler_class, ssl_context):
         super().__init__(server_address, request_handler_class)
@@ -260,13 +246,15 @@ class MobileSensorBridgeNode(Node):
 
         # Declare ROS 2 Parameters
         self.declare_parameter('port', 8443)
-        self.declare_parameter('image_topic', 'image_raw/compressed')
-        self.declare_parameter('imu_topic', 'imu/data_raw')
+        self.declare_parameter('image_topic', '/image_raw/compressed')
+        self.declare_parameter('imu_topic', '/imu/data_raw')
         self.declare_parameter('battery_topic', '/robot/battery')
         self.declare_parameter('gps_topic', '/robot/gps')
         self.declare_parameter('frame_id_camera', 'phone_camera')
         self.declare_parameter('frame_id_imu', 'phone_imu')
         self.declare_parameter('frame_id_gps', 'gps_link')
+        self.declare_parameter('bag_output_dir', '')
+        self.declare_parameter('heartbeat_timeout', 10.0)
 
         self.server_port = self.get_parameter('port').get_parameter_value().integer_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
@@ -276,6 +264,8 @@ class MobileSensorBridgeNode(Node):
         frame_id_camera = self.get_parameter('frame_id_camera').get_parameter_value().string_value
         frame_id_imu = self.get_parameter('frame_id_imu').get_parameter_value().string_value
         frame_id_gps = self.get_parameter('frame_id_gps').get_parameter_value().string_value
+        custom_bag_dir = self.get_parameter('bag_output_dir').get_parameter_value().string_value
+        self.heartbeat_timeout = self.get_parameter('heartbeat_timeout').get_parameter_value().double_value
 
         # Instantiate Camera, IMU, Battery, and GPS Bridges
         self.camera_bridge = CameraBridge(self, topic_name=image_topic, frame_id=frame_id_camera)
@@ -286,20 +276,26 @@ class MobileSensorBridgeNode(Node):
         # Rosbag2 Automatic Recording Setup
         self.record_process = None
         self.last_data_received_time = 0.0
-        workspace_root = os.getcwd()
-        try:
-            share_dir = get_package_share_directory('mobile_sensor_bridge')
-            possible_root = os.path.abspath(os.path.join(share_dir, '..', '..', '..', '..'))
-            if os.path.exists(os.path.join(possible_root, 'src')) or os.path.exists(os.path.join(possible_root, 'install')):
-                workspace_root = possible_root
-        except Exception:
-            pass
-        self.bag_dir = os.path.join(workspace_root, 'data')
+
+        if custom_bag_dir:
+            self.bag_dir = os.path.abspath(custom_bag_dir)
+        else:
+            workspace_root = os.getcwd()
+            try:
+                share_dir = get_package_share_directory('mobile_sensor_bridge')
+                possible_root = os.path.abspath(os.path.join(share_dir, '..', '..', '..', '..'))
+                if os.path.exists(os.path.join(possible_root, 'src')) or os.path.exists(os.path.join(possible_root, 'install')):
+                    workspace_root = possible_root
+            except Exception:
+                pass
+            self.bag_dir = os.path.join(workspace_root, 'data')
         os.makedirs(self.bag_dir, exist_ok=True)
 
-        # Thread-safe Publishing Queue & Spin Timers
-        self.publish_queue = queue.Queue()
-        self.create_timer(0.001, self._process_publish_queue)
+        # Separate Thread-safe Bounded Publishing Queues for Camera & Sensors
+        self.camera_publish_queue = queue.Queue(maxsize=10)
+        self.sensor_publish_queue = queue.Queue(maxsize=500)
+        self.create_timer(0.001, self._process_publish_queues)
+        self.create_timer(1.0, self._check_heartbeat_timeout)
 
         # Device Info Publisher
         self.device_info_publisher = self.create_publisher(
@@ -318,6 +314,11 @@ class MobileSensorBridgeNode(Node):
         self.key_file = os.path.join(self.cert_dir, 'key.pem')
 
         self.generate_certificates()
+        if os.path.exists(self.key_file):
+            try:
+                os.chmod(self.key_file, 0o600)
+            except Exception:
+                pass
 
         # Web Assets Location Resolution
         try:
@@ -330,8 +331,6 @@ class MobileSensorBridgeNode(Node):
                 'web',
                 'index.html'
             )
-
-        self.server_port = 8443
 
         # Configure HTTP Request Handler
         MobileSensorHTTPRequestHandler.node = self
@@ -386,6 +385,23 @@ class MobileSensorBridgeNode(Node):
 
         return ips
 
+    def parse_stamp(self, client_ts_ms_str: str):
+        """Parses client timestamp in milliseconds string to builtin_interfaces.msg.Time."""
+        if client_ts_ms_str:
+            try:
+                client_ts_ms = float(client_ts_ms_str)
+                client_ts_ns = int(client_ts_ms * 1e6)
+                sec = client_ts_ns // 1_000_000_000
+                nanosec = client_ts_ns % 1_000_000_000
+                from builtin_interfaces.msg import Time
+                stamp = Time()
+                stamp.sec = sec
+                stamp.nanosec = nanosec
+                return stamp
+            except Exception:
+                pass
+        return self.get_clock().now().to_msg()
+
     def generate_certificates(self) -> None:
         needs_regen = not os.path.exists(self.cert_file) or not os.path.exists(self.key_file)
         if not needs_regen:
@@ -422,30 +438,46 @@ class MobileSensorBridgeNode(Node):
             else:
                 self.get_logger().info('Multi-IP Certificate generated successfully.')
 
+    def _push_to_queue(self, target_queue: queue.Queue, item) -> None:
+        """Atomically pushes item to bounded queue without ever blocking HTTP handler thread."""
+        while True:
+            try:
+                target_queue.put_nowait(item)
+                return
+            except queue.Full:
+                try:
+                    target_queue.get_nowait()
+                except queue.Empty:
+                    pass
+
     def enqueue_device_info(self, data: dict) -> None:
-        self.publish_queue.put((self._publish_device_info, (data,)))
+        self._push_to_queue(self.sensor_publish_queue, (self._publish_device_info, (data,)))
 
     def enqueue_imu(self, data: dict, stamp) -> None:
         self.last_data_received_time = time.time()
-        self.publish_queue.put((self.imu_bridge.handle_imu, (data, stamp)))
+        self._push_to_queue(self.sensor_publish_queue, (self.imu_bridge.handle_imu, (data, stamp)))
 
     def enqueue_battery(self, data: dict, stamp) -> None:
         self.last_data_received_time = time.time()
-        self.publish_queue.put((self.battery_bridge.handle_battery, (data, stamp)))
+        self._push_to_queue(self.sensor_publish_queue, (self.battery_bridge.handle_battery, (data, stamp)))
 
     def enqueue_gps(self, data: dict, stamp) -> None:
         self.last_data_received_time = time.time()
-        self.publish_queue.put((self.gps_bridge.handle_gps, (data, stamp)))
+        self._push_to_queue(self.sensor_publish_queue, (self.gps_bridge.handle_gps, (data, stamp)))
 
-    def enqueue_upload(self, post_data: bytes, content_type: str, stamp) -> None:
+    def enqueue_upload(self, post_data: bytes, content_type: str, stamp,
+                       exposure_time: str = None, iso: str = None, frame_seq: str = None) -> None:
         self.last_data_received_time = time.time()
-        self.publish_queue.put((self.camera_bridge.handle_upload, (post_data, content_type, stamp)))
+        self._push_to_queue(
+            self.camera_publish_queue,
+            (self.camera_bridge.handle_upload, (post_data, content_type, stamp, exposure_time, iso, frame_seq))
+        )
 
     def _check_heartbeat_timeout(self) -> None:
-        """Automatically stops rosbag2 recording if client stream disconnects or stops sending data for over 3 seconds."""
+        """Automatically stops rosbag2 recording if client stream disconnects or stops sending data."""
         if self.record_process is not None and self.last_data_received_time > 0.0:
-            if time.time() - self.last_data_received_time > 3.0:
-                self.get_logger().info('No incoming sensor data for 3 seconds. Auto-closing rosbag2 recording...')
+            if time.time() - self.last_data_received_time > self.heartbeat_timeout:
+                self.get_logger().info(f'No incoming sensor data for {self.heartbeat_timeout} seconds. Auto-closing rosbag2 recording...')
                 self.stop_bag_recording()
 
     def _publish_device_info(self, data: dict) -> None:
@@ -467,15 +499,26 @@ class MobileSensorBridgeNode(Node):
             info_msg.data = json.dumps(data)
             self.device_info_publisher.publish(info_msg)
 
-    def _process_publish_queue(self) -> None:
-        while not self.publish_queue.empty():
+    def _process_publish_queues(self) -> None:
+        # Process Sensor Queue
+        while not self.sensor_publish_queue.empty():
             try:
-                func, args = self.publish_queue.get_nowait()
+                func, args = self.sensor_publish_queue.get_nowait()
                 func(*args)
             except queue.Empty:
                 break
             except Exception as e:
-                self.get_logger().error(f"Error processing publish queue: {e}")
+                self.get_logger().error(f"Error processing sensor publish queue: {e}")
+
+        # Process Camera Queue
+        while not self.camera_publish_queue.empty():
+            try:
+                func, args = self.camera_publish_queue.get_nowait()
+                func(*args)
+            except queue.Empty:
+                break
+            except Exception as e:
+                self.get_logger().error(f"Error processing camera publish queue: {e}")
 
     def start_bag_recording(self) -> None:
         """Starts automatic rosbag2 recording subprocess with QoS overrides for Best Effort sensor topics."""
@@ -486,34 +529,28 @@ class MobileSensorBridgeNode(Node):
         timestamp_str = datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
         output_path = os.path.join(self.bag_dir, f'rosbag2_{timestamp_str}')
 
-        qos_override_file = os.path.join(self.bag_dir, 'qos_overrides.yaml')
-        qos_content = (
-            "/image_raw/compressed:\n"
-            "  reliability: best_effort\n"
-            "  durability: volatile\n"
-            "  history: keep_last\n"
-            "  depth: 10\n"
-            "/imu/data_raw:\n"
-            "  reliability: best_effort\n"
-            "  durability: volatile\n"
-            "  history: keep_last\n"
-            "  depth: 10\n"
-            "/robot/battery:\n"
-            "  reliability: best_effort\n"
-            "  durability: volatile\n"
-            "  history: keep_last\n"
-            "  depth: 10\n"
-            "/robot/gps:\n"
-            "  reliability: best_effort\n"
-            "  durability: volatile\n"
-            "  history: keep_last\n"
-            "  depth: 10\n"
-            "/camera_info:\n"
+        # Single source of truth: topics that need best_effort QoS override
+        # Add new best_effort topics here only; device_info uses default reliable and is appended separately
+        best_effort_topics = [
+            '/image_raw/compressed',
+            '/imu/data_raw',
+            '/robot/battery',
+            '/robot/gps',
+            '/camera_info',
+            '/camera/exposure_metadata',
+        ]
+        reliable_topics = [
+            '/mobile_sensor_bridge/device_info',
+        ]
+
+        qos_entry = (
             "  reliability: best_effort\n"
             "  durability: volatile\n"
             "  history: keep_last\n"
             "  depth: 10\n"
         )
+        qos_content = ''.join(f"{t}:\n{qos_entry}" for t in best_effort_topics)
+        qos_override_file = os.path.join(self.bag_dir, 'qos_overrides.yaml')
         with open(qos_override_file, 'w') as f:
             f.write(qos_content)
 
@@ -522,12 +559,8 @@ class MobileSensorBridgeNode(Node):
             '-o', output_path,
             '--qos-profile-overrides-path', qos_override_file,
             '--topics',
-            'image_raw/compressed',
-            'imu/data_raw',
-            '/robot/battery',
-            '/robot/gps',
-            'mobile_sensor_bridge/device_info',
-            'camera_info'
+            *best_effort_topics,
+            *reliable_topics,
         ]
         try:
             self.record_process = subprocess.Popen(cmd, preexec_fn=os.setsid)
@@ -557,7 +590,11 @@ class MobileSensorBridgeNode(Node):
 
     def destroy_node(self) -> None:
         self.stop_bag_recording()
-        self.httpd.shutdown()
+        try:
+            self.httpd.server_close()
+            self.httpd.shutdown()
+        except Exception:
+            pass
         super().destroy_node()
 
 

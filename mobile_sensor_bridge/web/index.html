@@ -18,8 +18,21 @@
         </div>
 
         <div class="controls">
-            <button id="startBtn" class="btn">START STREAMING</button>
-            <button id="imuPermissionBtn" class="btn btn-secondary">IMU PERMISSION</button>
+            <div class="select-row">
+                <select id="resSelect" class="btn btn-secondary">
+                    <option value="720p" selected>720p (1280x720)</option>
+                    <option value="1080p">1080p (1920x1080)</option>
+                    <option value="4k">4K (3840x2160)</option>
+                </select>
+                <select id="expSelect" class="btn btn-secondary">
+                    <option value="auto">Auto -2EV (locked)</option>
+                    <option value="250">1/250s (bright)</option>
+                    <option value="120" selected>1/120s (default)</option>
+                    <option value="60">1/60s (indoor)</option>
+                </select>
+            </div>
+            <button id="startBtn" class="btn btn-action">START STREAMING</button>
+            <button id="imuPermissionBtn" class="btn btn-secondary btn-action">IMU PERMISSION</button>
         </div>
 
         <!-- Compact Monotone Sensor Data Table -->
@@ -113,12 +126,15 @@
 
         let mediaStream = null;
         let streaming = false;
-        let isUploading = false;
+        let inFlight = 0;
+        const MAX_IN_FLIGHT = 3;
         let isImuUploading = false;
         let animationFrameId = null;
         let imuIntervalId = null;
         let batteryIntervalId = null;
         let gpsIntervalId = null;
+        let lockedExposureTime = null;  // in 100us units (W3C spec), set after lockCameraConstraints
+        let lockedIso = null;
 
         const imuData = {
             accel: { x: 0, y: 0, z: 0 },
@@ -230,29 +246,49 @@
             return { model, os, browser, rawUserAgent: ua };
         }
 
+        function getSelectedConstraints() {
+            const resSelect = document.getElementById('resSelect');
+            const val = resSelect ? resSelect.value : '720p';
+            let width = 1280, height = 720;
+            if (val === '1080p') {
+                width = 1920; height = 1080;
+            } else if (val === '4k') {
+                width = 3840; height = 2160;
+            }
+            return {
+                video: {
+                    facingMode: { ideal: 'environment' },
+                    width: { ideal: width },
+                    height: { ideal: height },
+                    frameRate: { ideal: 60 }
+                },
+                audio: false
+            };
+        }
+
         async function initCamera() {
             try {
                 const deviceInfo = parseFastDeviceInfo();
+                const constraints = getSelectedConstraints();
 
-                const constraints = {
-                    video: {
-                        facingMode: { ideal: 'environment' },
-                        width: { ideal: 3840, max: 4096 },
-                        height: { ideal: 2160, max: 2160 },
-                        frameRate: { ideal: 60 }
-                    },
-                    audio: false
-                };
+                if (mediaStream) {
+                    mediaStream.getTracks().forEach(t => t.stop());
+                }
 
                 mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
                 video.srcObject = mediaStream;
+                try {
+                    await video.play();
+                } catch (e) {
+                    console.warn("video.play initial trigger warning:", e);
+                }
 
                 const videoTrack = mediaStream.getVideoTracks()[0];
                 if (videoTrack) {
                     const settings = videoTrack.getSettings();
                     deviceInfo.cameraLabel = videoTrack.label || "Default Camera";
-                    deviceInfo.width = settings.width;
-                    deviceInfo.height = settings.height;
+                    deviceInfo.width = settings.width || video.videoWidth;
+                    deviceInfo.height = settings.height || video.videoHeight;
                     deviceInfo.frameRate = settings.frameRate;
 
                     sendDeviceInfoAsync(deviceInfo);
@@ -265,21 +301,38 @@
             }
         }
 
+        let imuBuffer = [];
+        let frameSeq = 0;
+        let imuBatchSeq = 0;
+
         function setupIMUSensors() {
             if (window.DeviceMotionEvent) {
                 window.addEventListener('devicemotion', (event) => {
-                    const acc = event.accelerationIncludingGravity || event.acceleration;
-                    if (acc) {
-                        imuData.accel.x = acc.x || 0;
-                        imuData.accel.y = acc.y || 0;
-                        imuData.accel.z = acc.z || 0;
-                    }
-                    if (event.rotationRate) {
-                        imuData.gyro.alpha = event.rotationRate.alpha || 0;
-                        imuData.gyro.beta = event.rotationRate.beta || 0;
-                        imuData.gyro.gamma = event.rotationRate.gamma || 0;
-                    }
+                    const eventTimeMs = (event.timeStamp || performance.now()) + performance.timeOrigin;
+                    const syncedTsMs = eventTimeMs + clockOffsetMs;
+                    const acc = event.accelerationIncludingGravity || event.acceleration || {};
+                    const rot = event.rotationRate || {};
+
+                    imuData.accel.x = acc.x || 0;
+                    imuData.accel.y = acc.y || 0;
+                    imuData.accel.z = acc.z || 0;
+
+                    imuData.gyro.alpha = rot.alpha || 0;
+                    imuData.gyro.beta = rot.beta || 0;
+                    imuData.gyro.gamma = rot.gamma || 0;
+
                     updateIMUDashboardUI();
+
+                    if (!streaming) return;
+
+                    const sample = {
+                        clientTimestampMs: syncedTsMs,
+                        accel: { ...imuData.accel },
+                        gyro: { ...imuData.gyro },
+                        orientation: { ...imuData.orientation }
+                    };
+                    imuBuffer.push(sample);
+                    if (imuBuffer.length > 500) imuBuffer.shift();
                 });
             }
 
@@ -328,22 +381,34 @@
         }
 
         let clockOffsetMs = 0;
+        let syncIntervalId = null;
 
         async function syncTimeWithServer() {
-            try {
-                const t0 = performance.now() + performance.timeOrigin;
-                const res = await fetch('/sync_time');
-                const t1 = performance.now() + performance.timeOrigin;
-                if (res.ok) {
-                    const data = await res.json();
-                    const serverTimeMs = data.server_time_ns / 1e6;
-                    const rtt = t1 - t0;
-                    const estimatedServerTimeAtT1 = serverTimeMs + (rtt / 2);
-                    clockOffsetMs = estimatedServerTimeAtT1 - t1;
-                    console.log(`Time synced: RTT=${rtt.toFixed(2)}ms, clockOffset=${clockOffsetMs.toFixed(2)}ms`);
+            let bestRtt = Infinity;
+            let bestOffset = clockOffsetMs;
+
+            for (let i = 0; i < 5; i++) {
+                try {
+                    const t0 = performance.now() + performance.timeOrigin;
+                    const res = await fetch('/sync_time');
+                    const t1 = performance.now() + performance.timeOrigin;
+                    if (res.ok) {
+                        const data = await res.json();
+                        const serverTimeMs = data.server_time_ns / 1e6;
+                        const rtt = t1 - t0;
+                        if (rtt < bestRtt) {
+                            bestRtt = rtt;
+                            const estimatedServerTimeAtT1 = serverTimeMs + (rtt / 2);
+                            bestOffset = estimatedServerTimeAtT1 - t1;
+                        }
+                    }
+                } catch (e) {
+                    console.warn("Time sync probe failed:", e);
                 }
-            } catch (e) {
-                console.warn("Time sync failed:", e);
+            }
+            if (bestRtt !== Infinity) {
+                clockOffsetMs = bestOffset;
+                console.log(`Time synced: Min RTT=${bestRtt.toFixed(2)}ms, clockOffset=${clockOffsetMs.toFixed(2)}ms`);
             }
         }
 
@@ -361,93 +426,209 @@
         }
 
         function sendIMUData() {
-            if (!streaming || isImuUploading) return;
+            if (!streaming || isImuUploading || imuBuffer.length === 0) return;
             isImuUploading = true;
 
-            const clientTsMs = getSyncedTimestampMs();
-            const payload = {
-                ...imuData,
-                clientTimestampMs: clientTsMs
-            };
+            const batch = imuBuffer;
+            imuBuffer = [];
+            imuBatchSeq++;
 
+            const clientTsMs = getSyncedTimestampMs();
             fetch('/imu', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Client-Timestamp-Ms': clientTsMs.toString()
+                    'X-Client-Timestamp-Ms': clientTsMs.toString(),
+                    'X-Batch-Seq': imuBatchSeq.toString()
                 },
-                body: JSON.stringify(payload)
-            }).catch(err => console.warn("Failed to send IMU data:", err))
+                body: JSON.stringify(batch)
+            }).catch(err => console.warn("Failed to send IMU batch:", err))
             .finally(() => {
                 isImuUploading = false;
             });
         }
 
-        function sendFrameLoop() {
+        let wakeLock = null;
+
+        async function requestWakeLock() {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                }
+            } catch (err) {
+                console.warn("Wake lock failed:", err);
+            }
+        }
+
+        function releaseWakeLock() {
+            if (wakeLock !== null) {
+                wakeLock.release().then(() => { wakeLock = null; });
+            }
+        }
+
+        function sendFrameLoop(now, metadata) {
             if (!streaming) return;
 
-            if (!isUploading && video.videoWidth > 0 && video.videoHeight > 0) {
-                isUploading = true;
+            let captureTsMs = getSyncedTimestampMs();
+            if (metadata && metadata.captureTime) {
+                captureTsMs = metadata.captureTime + performance.timeOrigin + clockOffsetMs;
+            }
 
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
+            if (inFlight < MAX_IN_FLIGHT && video.videoWidth > 0 && video.videoHeight > 0) {
+                inFlight++;
+                frameSeq++;
+                const currentSeq = frameSeq;
+
+                // Only reallocate canvas backing store when resolution actually changes
+                if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                }
                 context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-                canvas.toBlob(async (blob) => {
+                canvas.toBlob((blob) => {
                     if (!blob) {
-                        isUploading = false;
+                        inFlight--;
                         return;
                     }
-                    try {
-                        const clientTsMs = getSyncedTimestampMs();
-                        const arrayBuffer = await blob.arrayBuffer();
-                        const response = await fetch('/upload', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'image/jpeg',
-                                'X-Client-Timestamp-Ms': clientTsMs.toString()
-                            },
-                            body: arrayBuffer
-                        });
-
-                        if (response.ok) {
-                            statusDiv.innerText = "STREAMING";
-                        } else {
-                            statusDiv.innerText = "ERROR";
-                        }
-                    } catch (err) {
+                    fetch('/upload', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'image/jpeg',
+                            'X-Client-Timestamp-Ms': captureTsMs.toString(),
+                            'X-Frame-Seq': currentSeq.toString(),
+                            ...(lockedExposureTime !== null && { 'X-Exposure-Time': lockedExposureTime.toString() }),
+                            ...(lockedIso !== null && { 'X-ISO': lockedIso.toString() })
+                        },
+                        body: blob
+                    }).then(response => {
+                        statusDiv.innerText = response.ok ? "STREAMING" : "ERROR";
+                    }).catch(err => {
                         console.error("Upload error: ", err);
                         statusDiv.innerText = "DISCONNECTED";
-                    } finally {
-                        isUploading = false;
-                    }
+                    }).finally(() => {
+                        inFlight--;
+                    });
                 }, 'image/jpeg', 0.85);
             }
 
-            animationFrameId = requestAnimationFrame(sendFrameLoop);
+            if ('requestVideoFrameCallback' in video) {
+                animationFrameId = video.requestVideoFrameCallback(sendFrameLoop);
+            } else {
+                animationFrameId = requestAnimationFrame(sendFrameLoop);
+            }
         }
 
-        startBtn.addEventListener('click', () => {
+        async function lockCameraConstraints() {
+            if (!streaming) return;       // guard: STOP pressed before lock fired
+            if (!mediaStream) return;
+            const videoTrack = mediaStream.getVideoTracks()[0];
+            if (!videoTrack || typeof videoTrack.applyConstraints !== 'function') return;
+
+            // Wait 1.5s for AF to converge; first captured frame will already have fixed intrinsics
+            await new Promise(r => setTimeout(r, 1500));
+            if (!streaming) return;       // re-check after delay
+
+            const caps = videoTrack.getCapabilities();
+            const tryApply = async (c) => {
+                try { await videoTrack.applyConstraints({ advanced: [c] }); }
+                catch (e) { console.warn('constraint skipped:', JSON.stringify(c), e.message); }
+            };
+
+            // Apply each constraint individually to avoid all-or-nothing rejection
+            if (caps.focusMode?.includes('manual')) await tryApply({ focusMode: 'manual' });
+            if (caps.whiteBalanceMode?.includes('manual')) await tryApply({ whiteBalanceMode: 'manual' });
+            if (caps.exposureMode?.includes('manual')) {
+                // Snapshot auto-converged values BEFORE switching to manual
+                const autoSettings = videoTrack.getSettings();
+                const autoExp = autoSettings.exposureTime;  // in 100μs units
+                const autoIso = autoSettings.iso;
+
+                await tryApply({ exposureMode: 'manual' });
+
+                const expSelect = document.getElementById('expSelect');
+                const expVal = expSelect ? expSelect.value : '120';
+
+                let appliedExp = autoExp;
+                if (expVal !== 'auto' && caps.exposureTime) {
+                    const fps = parseInt(expVal, 10) || 120;
+                    // W3C Image Capture spec: exposureTime unit is 100μs
+                    const target = Math.round(1e6 / fps / 100);
+                    appliedExp = Math.max(caps.exposureTime.min, Math.min(caps.exposureTime.max, target));
+                    await tryApply({ exposureTime: appliedExp });
+                    console.log(`Exposure locked: 1/${fps}s → ${appliedExp} (100μs units) range=[${caps.exposureTime.min}, ${caps.exposureTime.max}]`);
+                } else if (expVal === 'auto' && caps.exposureTime && autoExp) {
+                    // Adaptive: auto-converged value divided by 4 (2 stops shorter)
+                    appliedExp = Math.max(caps.exposureTime.min, Math.round(autoExp / 4));
+                    await tryApply({ exposureTime: appliedExp });
+                    console.log(`Adaptive exposure (-2EV): auto=${autoExp} → ${appliedExp} (100μs units)`);
+                }
+                lockedExposureTime = appliedExp;  // store for per-frame headers
+
+                // EV-preserving ISO: boost proportionally to compensate for shorter exposure
+                if (caps.iso && autoIso && autoExp && appliedExp && appliedExp !== autoExp) {
+                    const newIso = Math.round(autoIso * (autoExp / appliedExp));
+                    const clampedIso = Math.max(caps.iso.min, Math.min(caps.iso.max, newIso));
+                    await tryApply({ iso: clampedIso });
+                    lockedIso = clampedIso;  // store for per-frame headers
+                    console.log(`ISO (EV-compensated): ${autoIso} → ${clampedIso} (range=[${caps.iso.min}, ${caps.iso.max}])`);
+                }
+            }
+
+            // Use getSettings() as the source of truth — device may silently ignore tryApply()
+            const finalSettings = videoTrack.getSettings();
+            lockedExposureTime = finalSettings.exposureTime ?? null;
+            lockedIso = finalSettings.iso ?? null;
+            console.log('Camera settings after lock:', JSON.stringify(finalSettings));
+        }
+
+        startBtn.addEventListener('click', async () => {
             if (!streaming) {
+                try {
+                    await video.play();
+                } catch (e) {
+                    console.warn("video.play on click warning:", e);
+                }
                 streaming = true;
                 startBtn.innerText = "STOP STREAMING";
                 startBtn.classList.add('btn-stop');
-                animationFrameId = requestAnimationFrame(sendFrameLoop);
-                imuIntervalId = setInterval(sendIMUData, 30);
 
-                // Send immediate first packet for Battery and GPS
+                requestWakeLock();
+
+                // Wait for AF to converge and lock camera constraints before first frame capture
+                await lockCameraConstraints();
+
+                if ('requestVideoFrameCallback' in video) {
+                    animationFrameId = video.requestVideoFrameCallback(sendFrameLoop);
+                } else {
+                    animationFrameId = requestAnimationFrame(sendFrameLoop);
+                }
+                imuIntervalId = setInterval(sendIMUData, 200);
+
                 sendBatteryData();
                 sendGPSData();
 
                 batteryIntervalId = setInterval(sendBatteryData, 1000);
                 gpsIntervalId = setInterval(sendGPSData, 1000);
+                syncIntervalId = setInterval(syncTimeWithServer, 30000);
                 fetch('/record/start', { method: 'POST' }).catch(err => console.warn("Failed to request recording start:", err));
             } else {
                 streaming = false;
                 startBtn.innerText = "START STREAMING";
                 startBtn.classList.remove('btn-stop');
+
+                // Reset locked camera state so stale values are not reused in next session
+                lockedExposureTime = null;
+                lockedIso = null;
+
+                releaseWakeLock();
+
                 if (animationFrameId) {
-                    cancelAnimationFrame(animationFrameId);
+                    if ('cancelVideoFrameCallback' in video) {
+                        video.cancelVideoFrameCallback(animationFrameId);
+                    } else {
+                        cancelAnimationFrame(animationFrameId);
+                    }
                     animationFrameId = null;
                 }
                 if (imuIntervalId) {
@@ -462,12 +643,27 @@
                     clearInterval(gpsIntervalId);
                     gpsIntervalId = null;
                 }
+                if (syncIntervalId) {
+                    clearInterval(syncIntervalId);
+                    syncIntervalId = null;
+                }
                 statusDiv.innerText = "STOPPED";
                 fetch('/record/stop', { method: 'POST' }).catch(err => console.warn("Failed to request recording stop:", err));
             }
         });
 
         imuPermissionBtn.addEventListener('click', requestIMUPermission);
+
+        const resSelectEl = document.getElementById('resSelect');
+        if (resSelectEl) {
+            resSelectEl.addEventListener('change', () => {
+                if (!streaming) {
+                    lockedExposureTime = null;
+                    lockedIso = null;
+                    initCamera();
+                }
+            });
+        }
 
         window.addEventListener('load', () => {
             initCamera();
