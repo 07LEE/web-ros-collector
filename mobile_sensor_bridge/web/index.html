@@ -18,19 +18,21 @@
         </div>
 
         <div class="controls">
-            <select id="resSelect" class="btn btn-secondary" style="margin-right: 8px;">
-                <option value="720p" selected>720p (1280x720)</option>
-                <option value="1080p">1080p (1920x1080)</option>
-                <option value="4k">4K (3840x2160)</option>
-            </select>
-            <select id="expSelect" class="btn btn-secondary" style="margin-right: 8px;">
-                <option value="auto">Auto -2EV (locked)</option>
-                <option value="250">1/250s (bright)</option>
-                <option value="120" selected>1/120s (default)</option>
-                <option value="60">1/60s (indoor)</option>
-            </select>
-            <button id="startBtn" class="btn">START STREAMING</button>
-            <button id="imuPermissionBtn" class="btn btn-secondary">IMU PERMISSION</button>
+            <div class="select-row">
+                <select id="resSelect" class="btn btn-secondary">
+                    <option value="720p" selected>720p (1280x720)</option>
+                    <option value="1080p">1080p (1920x1080)</option>
+                    <option value="4k">4K (3840x2160)</option>
+                </select>
+                <select id="expSelect" class="btn btn-secondary">
+                    <option value="auto">Auto -2EV (locked)</option>
+                    <option value="250">1/250s (bright)</option>
+                    <option value="120" selected>1/120s (default)</option>
+                    <option value="60">1/60s (indoor)</option>
+                </select>
+            </div>
+            <button id="startBtn" class="btn btn-action">START STREAMING</button>
+            <button id="imuPermissionBtn" class="btn btn-secondary btn-action">IMU PERMISSION</button>
         </div>
 
         <!-- Compact Monotone Sensor Data Table -->
